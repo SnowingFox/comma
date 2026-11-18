@@ -5,6 +5,9 @@ use serde::Serialize;
 pub struct AppError {
     pub code: ErrorCode,
     pub message: String,
+    /// Machine-readable upstream reason, e.g. the Comma server's error code. Never a secret.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -16,11 +19,31 @@ pub enum ErrorCode {
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     Unsupported,
     Internal,
+    /// A key or setting the call needs is missing.
+    NotConfigured,
+    /// The provider rejected the key.
+    InvalidKey,
+    /// The key is valid but lacks a permission (ElevenLabs Speech to Text).
+    MissingPermission,
+    UnknownModel,
+    /// Connection refused, DNS failure, TLS failure.
+    Unreachable,
+    Timeout,
+    RateLimited,
+    /// Any other non-2xx or malformed answer from a provider.
+    Upstream,
+    /// The Comma server answered with an error; `reason` carries its code.
+    Server,
 }
 
 impl AppError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self { code, message: message.into(), reason: None }
+    }
+
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
     }
 
     pub fn invalid(message: impl Into<String>) -> Self {
