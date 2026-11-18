@@ -1,19 +1,24 @@
 import { useEffect } from "react";
 import { ArrowUpRight } from "@multica/ui/icons";
 import { ELEVENLABS_KEYS_URL, openExternal } from "../lib/external";
-import { useSecretStatus, useSttTest } from "../lib/queries";
+import { useSecretStatus, useSettings, useSttTest } from "../lib/queries";
 import { describeSttTest, ProviderTest } from "./provider-test";
 import { SecretField } from "./secret-field";
+import { SttModelPicker } from "./stt-model-picker";
 
-/** ElevenLabs key plus a Test that sends a generated one-second clip through Speech to Text. */
-export function SttFields({ label = "ElevenLabs API key" }: { label?: string }) {
+/**
+ * ElevenLabs key, the model picker, and a Test that sends a generated one-second clip through
+ * Speech to Text with the saved model. Used by onboarding and Settings.
+ */
+export function SttFields({ label = "ElevenLabs API key", showModel = true }: { label?: string; showModel?: boolean }) {
   const secrets = useSecretStatus();
+  const modelId = useSettings().data?.stt.model_id;
   const test = useSttTest();
   const hasKey = secrets.data?.elevenlabs ?? false;
   const testReset = test.reset;
 
-  // A new or removed key makes the last result stale.
-  useEffect(() => testReset(), [hasKey, testReset]);
+  // A new or removed key, or another model, makes the last result stale.
+  useEffect(() => testReset(), [hasKey, modelId, testReset]);
 
   return (
     <div className="flex flex-col gap-3.5">
@@ -34,6 +39,7 @@ export function SttFields({ label = "ElevenLabs API key" }: { label?: string }) 
           </>
         }
       />
+      {showModel ? <SttModelPicker /> : null}
       <ProviderTest
         state={test}
         onTest={() => test.mutate()}

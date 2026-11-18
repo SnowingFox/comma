@@ -139,28 +139,6 @@ export function GeneralSection() {
   );
 }
 
-function SttModelRow() {
-  const saved = useSettings().data?.stt.model_id ?? "";
-  const update = useUpdateSettings();
-  const [draft, setDraft] = useState(saved);
-  useEffect(() => setDraft(saved), [saved]);
-  const id = useId();
-  const dirty = draft.trim() !== saved && draft.trim().length > 0;
-  return (
-    <div className="flex items-end gap-2">
-      <div className="flex flex-1 flex-col gap-1.5">
-        <label htmlFor={id} className="text-label font-medium">
-          Model
-        </label>
-        <Input id={id} value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} className="font-mono" placeholder="scribe_v3" />
-      </div>
-      <Button variant="outline" disabled={!dirty || update.isPending} onClick={() => void run(update.mutateAsync({ stt: { model_id: draft.trim() } }).then(() => toast.success("Model saved")))}>
-        Save
-      </Button>
-    </div>
-  );
-}
-
 export function SpeechSection() {
   const languages = useSettings().data?.languages;
   const update = useUpdateSettings();
@@ -170,7 +148,6 @@ export function SpeechSection() {
       <SectionHeader title="Speech to text" description="ElevenLabs Scribe turns your voice into a raw transcript." />
       <Group title="ElevenLabs">
         <SttFields label="API key" />
-        <SttModelRow />
       </Group>
       {languages ? (
         <Group title="Languages" description="In order. The first one is used when detection is unsure.">
@@ -180,7 +157,9 @@ export function SpeechSection() {
           </Row>
         </Group>
       ) : null}
-      <Later items={["Keyterms from your dictionary"]} />
+      <p className="px-0.5 text-label text-muted-foreground">
+        Terms in your Dictionary are sent along as keyterms, so names and jargon come out spelled right.
+      </p>
     </>
   );
 }

@@ -10,6 +10,29 @@ import { formatMs } from "../lib/format";
 
 type TestState<T> = { status: "idle" | "pending" | "success" | "error"; data?: T; error: Error | null };
 
+export type ResultTone = "ok" | "error" | "muted";
+
+/** One test result line: a check or alert icon and the text, in the tone's colour. Shared by Test and Compare efforts. */
+export function TestResultRow({ tone, children, className }: { tone: ResultTone; children: ReactNode; className?: string }) {
+  return (
+    <p
+      className={cn(
+        "flex gap-1.5 text-label leading-snug",
+        match(tone)
+          .with("ok", () => "text-success")
+          .with("error", () => "text-destructive")
+          .otherwise(() => "text-muted-foreground"),
+        className,
+      )}
+    >
+      {tone === "ok" ? <Check className="mt-0.5 size-3.5 shrink-0" /> : null}
+      {tone === "error" ? <CircleAlert className="mt-0.5 size-3.5 shrink-0" /> : null}
+      {tone === "muted" ? <Spinner className="mt-0.5 size-3.5 shrink-0" /> : null}
+      <span className={cn("min-w-0", tone === "error" && "selectable")}>{children}</span>
+    </p>
+  );
+}
+
 /** A Test button with its result inline: latency and model on success, the precise error otherwise. */
 export function ProviderTest<T>({
   state,
@@ -18,6 +41,7 @@ export function ProviderTest<T>({
   disabled,
   disabledReason,
   className,
+  extra,
 }: {
   state: TestState<T>;
   onTest: () => void;
@@ -25,39 +49,17 @@ export function ProviderTest<T>({
   disabled?: boolean;
   disabledReason?: string;
   className?: string;
+  /** More buttons after Test, e.g. Compare efforts. */
+  extra?: ReactNode;
 }) {
   const { data, error } = state;
-  const idle = disabled && disabledReason ? { key: "disabled", tone: "muted", body: <span>{disabledReason}</span> } : null;
+  type Outcome = { key: string; tone: ResultTone | "hint"; body: ReactNode };
+  const idle: Outcome | null = disabled && disabledReason ? { key: "disabled", tone: "hint", body: disabledReason } : null;
   const outcome = match(state.status)
-    .with("pending", () => ({ key: "pending", tone: "muted", body: <span>Testing…</span> }))
-    .with("success", () =>
-      data === undefined
-        ? idle
-        : {
-            key: "ok",
-            tone: "ok",
-            body: (
-              <>
-                <Check className="mt-0.5 size-3.5 shrink-0" />
-                <span>{describe(data)}</span>
-              </>
-            ),
-          },
-    )
-    .with("error", () =>
-      error
-        ? {
-            key: `error:${error.message}`,
-            tone: "error",
-            body: (
-              <>
-                <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
-                <span className="selectable">{error.message}</span>
-              </>
-            ),
-          }
-        : idle,
-    )
+    .returnType<Outcome | null>()
+    .with("pending", () => ({ key: "pending", tone: "muted", body: "Testing…" }))
+    .with("success", () => (data === undefined ? idle : { key: "ok", tone: "ok", body: describe(data) }))
+    .with("error", () => (error ? { key: `error:${error.message}`, tone: "error", body: error.message } : idle))
     .with("idle", () => idle)
     .exhaustive();
 
@@ -74,25 +76,24 @@ export function ProviderTest<T>({
         {state.status === "pending" ? <Spinner className="size-3.5" /> : null}
         Test
       </Button>
+      {extra}
       <div className="min-h-7 min-w-0 flex-1" aria-live="polite">
         <AnimatePresence mode="wait" initial={false}>
           {outcome ? (
-            <motion.p
+            <motion.div
               key={outcome.key}
               initial={{ opacity: 0, y: 3 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.16 }}
-              className={cn(
-                "flex gap-1.5 pt-1.5 text-label leading-snug",
-                match(outcome.tone)
-                  .with("ok", () => "text-success")
-                  .with("error", () => "text-destructive")
-                  .otherwise(() => "text-muted-foreground"),
-              )}
+              className="pt-1.5"
             >
-              {outcome.body}
-            </motion.p>
+              {outcome.tone === "hint" ? (
+                <p className="text-label leading-snug text-muted-foreground">{outcome.body}</p>
+              ) : (
+                <TestResultRow tone={outcome.tone}>{outcome.body}</TestResultRow>
+              )}
+            </motion.div>
           ) : null}
         </AnimatePresence>
       </div>
