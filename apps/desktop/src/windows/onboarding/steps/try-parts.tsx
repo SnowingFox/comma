@@ -17,7 +17,7 @@ export function useTryReady(): { ready: boolean; missing: "account" | "stt" | "l
   const settings = useSettings().data;
   const secrets = useSecretStatus().data;
   if (!settings || !secrets) return { ready: false, missing: null };
-  if (settings.mode === "account") return { ready: false, missing: "account" };
+  if (settings.mode === "account") return { ready: true, missing: null };
   if (!secrets.elevenlabs) return { ready: false, missing: "stt" };
   if (!settings.llm.model) return { ready: false, missing: "llm" };
   return { ready: true, missing: null };
@@ -66,35 +66,31 @@ export function RunStatus({ phase, level, accel, hold = true, idle }: { phase: V
   const content = match(phase)
     .with({ kind: "idle" }, () => (
       <>
-        <span>{hold ? "Hold" : "Tap"}</span>
+        <span>{hold ? "Hold" : "Press"}</span>
         <Keycaps accel={accel} size="sm" />
-        <span>{idle ?? (hold ? "and speak, then let go." : "to start, and tap again when you are done.")}</span>
+        <span>{idle ?? (hold ? "and speak, then let go." : "to start, and press again when you are done.")}</span>
       </>
     ))
-    .with({ kind: "recording" }, () => (
+    .with({ kind: "recording" }, ({ handsFree }) => (
       <>
         <MiniWave level={level} />
-        <span className="font-medium text-foreground">{hold ? "Listening. Let go when you are done." : "Listening. Tap again when you are done."}</span>
+        <span className="font-medium text-foreground">
+          {handsFree ? "Hands-free. Press once more when you are done." : hold ? "Listening. Let go when you are done." : "Listening. Press again when you are done."}
+        </span>
         <span className="text-faint-foreground">Esc cancels</span>
       </>
     ))
-    .with({ kind: "transcribing" }, () => (
+    .with({ kind: "processing" }, () => (
       <>
         <Spinner className="size-3.5" />
-        <span>Turning speech into text…</span>
+        <span>Turning speech into text and cleaning it up…</span>
       </>
     ))
-    .with({ kind: "refining" }, () => (
-      <>
-        <Spinner className="size-3.5" />
-        <span>Cleaning it up…</span>
-      </>
-    ))
-    .with({ kind: "done" }, ({ raw, refined }) => (
+    .with({ kind: "done" }, ({ result }) => (
       <>
         <span className="text-success">Done.</span>
         <span>
-          Speech {formatMs(raw.total_ms)}, rewrite {formatMs(refined.total_ms)} with <span className="font-mono">{refined.model}</span>. Try again any time.
+          Speech {formatMs(result.stt_ms)}, rewrite {formatMs(result.llm_total_ms)}. Try again any time.
         </span>
       </>
     ))

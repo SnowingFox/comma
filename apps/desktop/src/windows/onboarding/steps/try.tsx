@@ -30,7 +30,7 @@ export function TryDictateStep() {
   const { phase } = run;
   useStepControls({});
 
-  const shown = phase.kind === "done" ? (view === "raw" ? phase.raw.text : phase.refined.text) : "";
+  const shown = phase.kind === "done" ? (view === "raw" ? phase.result.raw_text : phase.result.refined_text) : "";
 
   return (
     <Stacked title="Dictate" lead="Hold the shortcut, say a reply, and let go. Comma removes the fillers and fixes the punctuation.">
@@ -82,7 +82,7 @@ export function TryDictateStep() {
                 disabled={phase.kind !== "done"}
                 onClick={() => {
                   if (phase.kind !== "done") return;
-                  setSent((s) => [...s, phase.refined.text]);
+                  setSent((s) => [...s, phase.result.refined_text]);
                   run.reset();
                   setView("refined");
                 }}
@@ -134,7 +134,6 @@ export function TryAskStep() {
   const run = useVoiceRun({
     mode: "ask",
     accel,
-    toggle: true,
     enabled: ready,
     context: () => {
       range.current = selectionIn(paragraphRef.current);
@@ -150,12 +149,12 @@ export function TryAskStep() {
     if (phase.kind !== "done" || applied.current === phase) return;
     applied.current = phase;
     const sel = range.current;
-    if (sel && phase.refined.delivery !== "external") {
-      setText((t) => ({ before: full.slice(0, sel.start), inserted: phase.refined.text, after: full.slice(sel.end), n: t.n + 1 }));
+    if (sel && phase.result.delivery === "replace") {
+      setText((t) => ({ before: full.slice(0, sel.start), inserted: phase.result.refined_text, after: full.slice(sel.end), n: t.n + 1 }));
       window.getSelection()?.removeAllRanges();
       setDone((d) => ({ ...d, rewrite: true }));
     } else {
-      setAnswer(phase.refined.text);
+      setAnswer(phase.result.refined_text);
       setDone((d) => ({ ...d, question: true }));
     }
   }, [phase, full]);
@@ -166,7 +165,7 @@ export function TryAskStep() {
   ];
 
   return (
-    <Stacked title="Ask Anything" lead="Tap the shortcut, say what you want, and tap again. With text selected, Comma changes it. With nothing selected, it answers.">
+    <Stacked title="Ask Anything" lead="Press the shortcut once, say what you want, and press it again. With text selected, Comma changes it. With nothing selected, it answers.">
       {!ready && missing ? (
         <NeedsKeys missing={missing} />
       ) : (
@@ -260,7 +259,7 @@ export function TryTranslateStep() {
   const { phase } = run;
   useStepControls({});
 
-  const shown = phase.kind === "done" ? (view === "raw" ? phase.raw.text : phase.refined.text) : "";
+  const shown = phase.kind === "done" ? (view === "raw" ? phase.result.raw_text : phase.result.refined_text) : "";
 
   return (
     <Stacked title="Translate" lead="Speak in your language and Comma writes it in another. Pick up to three targets; the first is used.">
