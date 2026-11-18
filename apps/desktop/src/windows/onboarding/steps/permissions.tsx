@@ -70,15 +70,16 @@ export function PermissionsStep() {
   useStepControls({});
   return (
     <Split
-      title="Two permissions"
+      title="Three permissions"
       lead="macOS asks once for each. The rows turn green as soon as you allow them."
       art={<DataPanel />}
       artClassName="items-stretch bg-app-shell p-5"
     >
       <PermissionList />
       <p className="text-caption text-muted-foreground">
-        Comma never watches the rest of your keyboard and reads nothing from other apps outside a run you start. You can
-        change these later in System Settings, Privacy & Security.
+        Input Monitoring is how macOS lets an app see the Fn key. Comma looks only at its shortcut keys and Esc; every
+        other key is ignored the moment it arrives and never stored or sent. Without it, Comma uses ⌥ Space and the
+        other ordinary shortcuts instead. You can change these later in System Settings, Privacy & Security.
       </p>
     </Split>
   );

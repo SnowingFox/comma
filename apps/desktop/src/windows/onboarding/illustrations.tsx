@@ -243,20 +243,30 @@ const ROWS: KeyDef[][] = [
   [..."`1234567890-=".split("").map((c, i) => ({ id: ["Backquote", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "Minus", "Equal"][i]!, label: c })), { id: "Backspace", label: "⌫", w: 1.5 }],
   [{ id: "Tab", label: "⇥", w: 1.5 }, ..."QWERTYUIOP".split("").map((c) => ({ id: c, label: c })), { id: "BracketLeft", label: "[" }, { id: "BracketRight", label: "]" }, { id: "Backslash", label: "\\" }],
   [{ id: "Caps", label: "⇪", w: 1.75 }, ..."ASDFGHJKL".split("").map((c) => ({ id: c, label: c })), { id: "Semicolon", label: ";" }, { id: "Quote", label: "'" }, { id: "Enter", label: "↩", w: 1.75 }],
-  [{ id: "Shift", label: "⇧", w: 2.25 }, ..."ZXCVBNM".split("").map((c) => ({ id: c, label: c })), { id: "Comma", label: "," }, { id: "Period", label: "." }, { id: "Slash", label: "/" }, { id: "Shift", label: "⇧", w: 2.25 }],
+  [{ id: "ShiftLeft", label: "⇧", w: 2.25 }, ..."ZXCVBNM".split("").map((c) => ({ id: c, label: c })), { id: "Comma", label: "," }, { id: "Period", label: "." }, { id: "Slash", label: "/" }, { id: "ShiftRight", label: "⇧", w: 2.25 }],
   [
     { id: "Fn", label: "fn" },
-    { id: "Control", label: "⌃" },
-    { id: "Alt", label: "⌥" },
-    { id: "Super", label: "⌘", w: 1.25 },
+    { id: "ControlLeft", label: "⌃" },
+    { id: "AltLeft", label: "⌥" },
+    { id: "MetaLeft", label: "⌘", w: 1.25 },
     { id: "Space", label: "", w: 5 },
-    { id: "Super", label: "⌘", w: 1.25 },
-    { id: "Alt", label: "⌥" },
+    { id: "MetaRight", label: "⌘", w: 1.25 },
+    { id: "AltRight", label: "⌥" },
     { id: "Left", label: "←" },
     { id: "Up", label: "↕" },
     { id: "Right", label: "→" },
   ],
 ];
+
+const GENERIC: Record<string, string> = {
+  ShiftLeft: "Shift",
+  ShiftRight: "Shift",
+  ControlLeft: "Control",
+  AltLeft: "Alt",
+  AltRight: "Alt",
+  MetaLeft: "Super",
+  MetaRight: "Super",
+};
 
 /**
  * A laptop keyboard. Keys in `target` are outlined; keys in `held` press down and fill with the
@@ -275,8 +285,10 @@ export function KeyboardIllustration({ target, held }: { target: ReadonlySet<str
           const w = (key.w ?? 1) * u - gap;
           const kx = x;
           x += (key.w ?? 1) * u;
-          const lit = held.has(key.id);
-          const wanted = target.has(key.id);
+          // `Shift` in an ordinary shortcut means either side; `ShiftLeft` in an Fn one means that key.
+          const generic = GENERIC[key.id];
+          const lit = held.has(key.id) || (generic !== undefined && held.has(generic));
+          const wanted = target.has(key.id) || (generic !== undefined && target.has(generic));
           return (
             <motion.g
               key={`${r}-${k}`}

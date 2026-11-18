@@ -1,17 +1,18 @@
 import type { ComponentType, SVGProps } from "react";
 import { motion } from "motion/react";
 import { toast } from "sonner";
-import type { PermissionState, SettingsPaneKind } from "@comma/shared/ipc";
+import type { PermissionState, PermissionsStatus } from "@comma/shared/ipc";
 import { Badge } from "@multica/ui/components/ui/badge";
 import { Button } from "@multica/ui/components/ui/button";
-import { Check, Keyboard, Mic } from "@multica/ui/icons";
+import { Check, Keyboard, Mic, Type } from "@multica/ui/icons";
 import { cn } from "@multica/ui/lib/utils";
 import { invoke } from "../lib/ipc";
 import { usePermissions } from "../lib/queries";
+import { allowInputMonitoring } from "./shortcut-notes";
 import { StatusDot } from "./status-dot";
 
 const ROWS: {
-  kind: SettingsPaneKind;
+  kind: keyof PermissionsStatus;
   title: string;
   description: string;
   icon: ComponentType<SVGProps<SVGSVGElement>>;
@@ -26,6 +27,12 @@ const ROWS: {
     kind: "accessibility",
     title: "Accessibility",
     description: "Pastes text into the app you are using, and reads the selection for Ask Anything.",
+    icon: Type,
+  },
+  {
+    kind: "input_monitoring",
+    title: "Input Monitoring",
+    description: "Lets Comma notice the Fn key. It only watches your shortcut keys and Esc, and never records anything you type.",
     icon: Keyboard,
   },
 ];
@@ -61,7 +68,9 @@ export function PermissionList({ className }: { className?: string }) {
         const onClick = () => {
           const run = kind === "microphone" && state === "not_determined"
             ? requestMicrophone()
-            : invoke("open_settings_pane", { kind });
+            : kind === "input_monitoring"
+              ? allowInputMonitoring()
+              : invoke("open_settings_pane", { kind });
           run.catch((err: Error) => toast.error(err.message));
         };
         return (
@@ -96,7 +105,7 @@ export function PermissionList({ className }: { className?: string }) {
             </div>
             {granted ? null : (
               <Button variant="outline" size="sm" onClick={onClick} disabled={state === "restricted"}>
-                {kind === "microphone" && state === "not_determined" ? "Allow" : "Open Settings"}
+                {(kind === "microphone" && state === "not_determined") || kind === "input_monitoring" ? "Allow" : "Open Settings"}
               </Button>
             )}
           </li>

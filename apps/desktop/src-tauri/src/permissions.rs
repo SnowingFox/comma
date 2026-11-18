@@ -27,6 +27,8 @@ pub enum SettingsPaneKind {
     Microphone,
     Accessibility,
     InputMonitoring,
+    /// Keyboard settings, for "Press Globe key to".
+    Keyboard,
 }
 
 impl SettingsPaneKind {
@@ -42,6 +44,7 @@ impl SettingsPaneKind {
             SettingsPaneKind::InputMonitoring => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
             }
+            SettingsPaneKind::Keyboard => "x-apple.systempreferences:com.apple.Keyboard-Settings.extension",
         }
     }
 }

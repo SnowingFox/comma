@@ -2,9 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { match, P } from "ts-pattern";
 
 /**
- * Accelerators are stored as `Alt+Shift+Space` (the global-shortcut plugin's format). While the
- * onboarding window is focused, Comma listens to its own key events to light the keycaps; nothing
- * is registered with macOS yet.
+ * Shortcuts are stored as `Fn`, `Fn+Space`, `Fn+ShiftLeft` (Comma's Fn listener) or `Alt+Shift+Space` (the
+ * global-shortcut plugin's format). Key ids in `Keycap.id` match the names in `shortcut://keys`.
  */
 
 export type Modifier = "Control" | "Alt" | "Shift" | "Super";
@@ -51,8 +50,37 @@ const KEY_LABELS: Record<string, string> = {
   Backquote: "`",
 };
 
+/** Keys that can follow `Fn+`, as keycaps. Side-specific modifiers say which side. */
+const FN_KEY_CAPS: Record<string, Omit<Keycap, "id" | "modifier">> = {
+  Space: { label: "Space", name: "Space" },
+  ShiftLeft: { label: "⇧ Left", name: "Left Shift" },
+  ShiftRight: { label: "⇧ Right", name: "Right Shift" },
+  ControlLeft: { label: "⌃ Left", name: "Left Control" },
+  ControlRight: { label: "⌃ Right", name: "Right Control" },
+  AltLeft: { label: "⌥ Left", name: "Left Option" },
+  AltRight: { label: "⌥ Right", name: "Right Option" },
+  MetaLeft: { label: "⌘ Left", name: "Left Command" },
+  MetaRight: { label: "⌘ Right", name: "Right Command" },
+};
+
+/** `Fn+ShiftLeft` -> fn, ⇧ Left. */
+function parseFn(accel: string): Keycap[] {
+  const caps: Keycap[] = [{ id: "Fn", label: "fn", name: "Fn (Globe)", modifier: true }];
+  const key = accel.split("+")[1];
+  if (key) caps.push({ id: key, modifier: false, ...(FN_KEY_CAPS[key] ?? { label: key, name: key }) });
+  return caps;
+}
+
+/** Plain words for a shortcut, for copy: "Fn", "Fn + Space", "Option Space". */
+export function acceleratorWords(accel: string): string {
+  return parseAccelerator(accel)
+    .map((c) => (c.id === "Fn" ? "Fn" : c.name))
+    .join(accel.startsWith("Fn") ? " + " : " ");
+}
+
 /** `Alt+Shift+Space` -> ⌥ ⇧ Space, modifiers in macOS order. */
 export function parseAccelerator(accel: string): Keycap[] {
+  if (accel === "Fn" || accel.startsWith("Fn+")) return parseFn(accel);
   const tokens = accel.split("+").filter(Boolean);
   const mods = new Set<Modifier>();
   let key: string | undefined;

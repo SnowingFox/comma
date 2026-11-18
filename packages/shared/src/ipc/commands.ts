@@ -27,7 +27,7 @@ export const PermissionsStatus = z.object({
 export type PermissionsStatus = z.infer<typeof PermissionsStatus>;
 
 /** The System Settings Privacy pane to open. */
-export const SettingsPaneKind = z.enum(["microphone", "accessibility", "input_monitoring"]);
+export const SettingsPaneKind = z.enum(["microphone", "accessibility", "input_monitoring", "keyboard"]);
 export type SettingsPaneKind = z.infer<typeof SettingsPaneKind>;
 
 export const WindowLabel = z.enum(["hub", "onboarding", "bar"]);

@@ -1,4 +1,5 @@
 import { DEFAULT_SHORTCUTS } from "@comma/shared/ipc";
+import { InputMonitoringNote } from "../../../components/shortcut-notes";
 import { Button } from "@multica/ui/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@multica/ui/components/ui/card";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
@@ -107,6 +108,7 @@ export function HomePage() {
   return (
     <Page title="Home">
       <div className="mx-auto flex max-w-4xl flex-col gap-6 px-8 py-7">
+        <InputMonitoringNote />
         <div className="flex flex-col gap-1.5">
           <h2 className="text-display-sm font-semibold tracking-tight">{greeting()}</h2>
           <p className="flex flex-wrap items-center gap-1.5 text-body text-muted-foreground">

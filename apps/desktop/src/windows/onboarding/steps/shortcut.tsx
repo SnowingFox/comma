@@ -4,18 +4,24 @@ import { DEFAULT_SHORTCUTS } from "@comma/shared/ipc";
 import { Check } from "@multica/ui/icons";
 import { Keycaps } from "../../../components/keycaps";
 import { ShortcutRecorder } from "../../../components/shortcut-recorder";
+import { GlobeKeyNote, InputMonitoringNote } from "../../../components/shortcut-notes";
 import { useSettings } from "../../../lib/queries";
-import { parseAccelerator, useShortcutHold } from "../../../lib/shortcut";
+import { parseAccelerator } from "../../../lib/shortcut";
+import { useCaptureShortcuts, useHeldKeys, useShortcutsStatus } from "../../../lib/shortcut-events";
 import { useStepControls } from "../flow";
 import { KeyboardIllustration } from "../illustrations";
 import { Split } from "./layout";
 
 export function ShortcutStep() {
-  const accel = useSettings().data?.shortcuts.dictate ?? DEFAULT_SHORTCUTS.dictate;
+  const configured = useSettings().data?.shortcuts.dictate ?? DEFAULT_SHORTCUTS.dictate;
+  const status = useShortcutsStatus().data;
+  // Without Input Monitoring an Fn shortcut falls back to an ordinary one; test what works now.
+  const accel = status?.active.dictate || configured;
   const [pressed, setPressed] = useState(false);
   const [recorderOpen, setRecorderOpen] = useState(false);
-  // Keys are read only while this window is focused and the recorder is closed.
-  const held = useShortcutHold(accel, { enabled: !recorderOpen, onDown: () => setPressed(true) });
+  useCaptureShortcuts(!recorderOpen);
+  // Only the configured keys are reported, by Comma's listener; nothing else on the keyboard.
+  const held = useHeldKeys(accel, { enabled: !recorderOpen, onPress: () => setPressed(true) });
   const target = new Set(parseAccelerator(accel).map((c) => c.id));
 
   useStepControls({
@@ -51,6 +57,8 @@ export function ShortcutStep() {
             )}
           </AnimatePresence>
         </div>
+        <InputMonitoringNote />
+        <GlobeKeyNote />
         <p className="text-label text-muted-foreground">
           If some keys stay dark, another app may be using them. Choose No to pick different keys.
         </p>

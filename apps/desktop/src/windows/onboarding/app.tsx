@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSettingsSync } from "../../lib/shortcut-events";
 import { AnimatePresence, motion, type Variants } from "motion/react";
 import { toast } from "sonner";
 import { match } from "ts-pattern";
@@ -46,6 +47,7 @@ function renderStep(step: OnboardingStep) {
 }
 
 export function OnboardingApp() {
+  useSettingsSync();
   const settings = useSettings();
   if (!settings.data) {
     return (
