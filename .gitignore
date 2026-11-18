@@ -8,3 +8,4 @@ target/
 !.env.example
 # local-only notes: machine paths, reverse-engineering locations
 docs/local/
+.build-logs/
