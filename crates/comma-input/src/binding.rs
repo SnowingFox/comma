@@ -211,6 +211,23 @@ impl Matcher {
         *self = Self::new(bindings);
     }
 
+    /// Whether an active tap should swallow `ev` (call before [`Matcher::feed`]): the Fn key's own
+    /// flags-changed events while an Fn shortcut is configured, so macOS's Globe key action does
+    /// not run, and Space while it is the trigger of a held Fn combination, so no space is typed.
+    /// Everything else passes through. Modifier triggers (Shift and so on) always pass, so other
+    /// apps never see a modifier stuck down.
+    pub fn consumes(&self, ev: &RawEvent) -> bool {
+        if self.bindings.is_empty() {
+            return false;
+        }
+        match *ev {
+            RawEvent::FlagsChanged { keycode, .. } => keycode == FN_KEYCODE,
+            RawEvent::KeyDown { keycode: SPACE_KEYCODE, .. } => self.bindings.is_trigger(FnKey::Space) && self.fn_down,
+            RawEvent::KeyUp { keycode: SPACE_KEYCODE } => self.bindings.is_trigger(FnKey::Space) && self.triggers.contains(&FnKey::Space),
+            _ => false,
+        }
+    }
+
     pub fn feed(&mut self, ev: RawEvent, listen_escape: bool) -> MatcherOutput {
         let mut inputs = Vec::new();
         match ev {
@@ -452,6 +469,34 @@ mod tests {
         let mut m = Matcher::new(FnBindings::default());
         let out = m.feed(fn_down(), false);
         assert!(out.is_empty(), "no Fn bindings, nothing reported");
+    }
+
+    #[test]
+    fn consumes_only_fn_and_a_space_that_is_a_trigger() {
+        let mut m = defaults();
+        let space_down = RawEvent::KeyDown { keycode: SPACE_KEYCODE, repeat: false };
+        let space_up = RawEvent::KeyUp { keycode: SPACE_KEYCODE };
+        // Typing a space without Fn passes through.
+        assert!(!m.consumes(&space_down) && !m.consumes(&space_up));
+        assert!(m.consumes(&fn_down()));
+        m.feed(fn_down(), false);
+        assert!(m.consumes(&space_down), "Fn+Space must not type a space");
+        m.feed(space_down, false);
+        assert!(m.consumes(&RawEvent::KeyDown { keycode: SPACE_KEYCODE, repeat: true }));
+        // Fn released first: the Space release still belongs to the combination.
+        assert!(m.consumes(&fn_up()));
+        m.feed(fn_up(), false);
+        assert!(m.consumes(&space_up));
+        m.feed(space_up, false);
+        assert!(!m.consumes(&space_up));
+        // Modifiers, arrows and letters always pass, even with Fn held.
+        m.feed(fn_down(), false);
+        assert!(!m.consumes(&RawEvent::FlagsChanged { keycode: SHIFT_L, flags: FN_FLAG | SHIFT_L_FLAGS }));
+        assert!(!m.consumes(&RawEvent::KeyDown { keycode: LEFT_ARROW, repeat: false }));
+        assert!(!m.consumes(&RawEvent::KeyDown { keycode: ESCAPE_KEYCODE, repeat: false }));
+        // Nothing configured on Fn: nothing is swallowed.
+        let m = Matcher::new(FnBindings::default());
+        assert!(!m.consumes(&fn_down()));
     }
 
     #[test]

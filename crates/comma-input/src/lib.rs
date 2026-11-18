@@ -21,4 +21,4 @@ pub mod tap;
 
 pub use binding::{FnBinding, FnBindings, FnKey, Matcher, MatcherOutput, RawEvent, parse_fn};
 pub use machine::{Action, Config, Hint, Input, Machine, Mode};
-pub use tap::{FnTap, TapError, input_monitoring_granted, request_input_monitoring};
+pub use tap::{FnTap, TapError, TapMode, input_monitoring_granted, request_input_monitoring};
