@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BarState, RunMode, type BarPreviewPayload, type HintKind, type RunResult } from "@comma/shared/ipc";
 import { mountWindow } from "../../components/providers";
 import { allowInputMonitoring } from "../../components/shortcut-notes";
+import { OpusStream } from "../../lib/audio/ogg-opus";
 import { encodeClip, listMicrophones, Recorder } from "../../lib/audio/recorder";
 import { emitTo, errorMessage, inTauri, invoke, IpcError, listen } from "../../lib/ipc";
 import { useSettings, useUpdateSettings } from "../../lib/queries";
@@ -50,6 +51,8 @@ function useBarLoop() {
   const [answer, setAnswer] = useState<string | null>(null);
   const level = useRef(0);
   const recorder = useRef<Recorder | null>(null);
+  /** Encodes while the user talks; null without WebCodecs Opus. */
+  const encoder = useRef<OpusStream | null>(null);
   const opening = useRef<Promise<void> | null>(null);
   const stopRequested = useRef(false);
   const startedAt = useRef(0);
@@ -88,9 +91,13 @@ function useBarLoop() {
     });
   }, [layout]);
 
-  const closeRecorder = () => {
+  const closeRecorder = (keepEncoder = false) => {
     recorder.current?.close();
     recorder.current = null;
+    if (!keepEncoder) {
+      encoder.current?.close();
+      encoder.current = null;
+    }
     level.current = 0;
   };
 
@@ -170,9 +177,12 @@ function useBarLoop() {
     const run = generation.current;
     const recordMs = performance.now() - startedAt.current;
     const { samples, peak } = rec.stopSamples();
-    closeRecorder();
+    const stream = encoder.current;
+    encoder.current = null;
+    closeRecorder(true);
     const mode = modeRef.current;
     const secs = samples.length / 16_000;
+    if (secs < MIN_SECS || peak < SILENCE_PEAK) stream?.close();
     if (secs < MIN_SECS) {
       // A tap, not a dictation: go away quietly.
       settle();
@@ -185,7 +195,7 @@ function useBarLoop() {
     }
     setView({ state: "processing", mode });
     try {
-      const clip = await encodeClip(samples);
+      const clip = await encodeClip(samples, stream);
       const result: RunResult = await invoke("pipeline_run", {
         mode,
         audio_base64: clip.base64,
@@ -236,17 +246,26 @@ function useBarLoop() {
       layout("full", !!hint, true);
       if (sounds()) playTick("start");
       const deviceId = settingsRef.current?.audio.microphone_id || undefined;
-      opening.current = Recorder.open(deviceId)
-        .catch((err: unknown) => {
-          // A saved device that is gone falls back to the default one.
-          if (deviceId && err instanceof DOMException && err.name === "OverconstrainedError") return Recorder.open();
-          throw err;
-        })
-        .then(async (rec) => {
+      const run = generation.current;
+      const opened = Recorder.open(deviceId).catch((err: unknown) => {
+        // A saved device that is gone falls back to the default one.
+        if (deviceId && err instanceof DOMException && err.name === "OverconstrainedError") return Recorder.open();
+        throw err;
+      });
+      opening.current = Promise.all([opened, OpusStream.create().catch(() => null)])
+        .then(async ([rec, stream]) => {
+          if (run !== generation.current) {
+            // Cancelled while the microphone was opening.
+            rec.close();
+            stream?.close();
+            return;
+          }
           recorder.current = rec;
+          encoder.current = stream;
           rec.onLevel = (l) => {
             level.current = l;
           };
+          rec.onSamples = stream ? (s) => stream.push(s) : undefined;
           rec.start();
           if (stopRequested.current) void process();
           const better = betterMicrophone(rec.deviceLabel, await listMicrophones().catch(() => []));

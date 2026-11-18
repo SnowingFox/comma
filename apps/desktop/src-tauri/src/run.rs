@@ -152,6 +152,7 @@ pub fn on_action(app: &AppHandle, action: &Action, target: Target) {
                 return;
             }
             crate::ducking::duck(&state);
+            prewarm(&state);
             let _ = crate::windows::prepare_bar(app);
             let captured = capture(&state, run_mode(*mode));
             if let Ok(mut session) = state.session.lock()
@@ -186,6 +187,36 @@ pub fn on_action(app: &AppHandle, action: &Action, target: Target) {
             }
         }
         Action::Switch { .. } => {}
+    }
+}
+
+/// Hosts a run will call, to open while the user talks: a fresh TLS connection costs about 220 ms
+/// (measured to api.elevenlabs.io), and an idle one is reused from the shared client's pool.
+pub fn prewarm_urls(mode: AppMode, elevenlabs: &str, llm_base: &str, server: &str) -> Vec<String> {
+    let remote = |u: &str| !(u.contains("://127.0.0.1") || u.contains("://localhost") || u.contains("://[::1]"));
+    let mut urls = Vec::new();
+    match mode {
+        AppMode::Local => {
+            urls.push(format!("{}/v1/models", elevenlabs.trim_end_matches('/')));
+            if remote(llm_base) {
+                urls.push(format!("{}/models", llm_base.trim_end_matches('/')));
+            }
+        }
+        AppMode::Account if remote(server) => urls.push(format!("{}/v1/health", server.trim_end_matches('/'))),
+        AppMode::Account => {}
+    }
+    urls
+}
+
+/// Opens the connections without credentials; the answer (often 401) is dropped.
+fn prewarm(state: &AppState) {
+    let Ok(s) = state.snapshot() else { return };
+    let urls = prewarm_urls(s.mode, &state.elevenlabs_base_url, &s.llm.base_url, &s.account.server_url);
+    for url in urls {
+        let http = state.http.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = http.head(url).timeout(Duration::from_secs(3)).send().await;
+        });
     }
 }
 
@@ -611,7 +642,7 @@ async fn run_local(
     rc.app = ctx.app.clone();
     rc.selected_text = ctx.selected_text.clone();
     rc.timeout = Duration::from_secs(60);
-    let audio = Audio { bytes: clip.bytes.clone(), mime: clip.mime.into() };
+    let audio = Audio { bytes: clip.bytes.clone(), mime: clip.mime.into(), secs: Some(clip.secs) };
 
     let delta_target = source_label.to_owned();
     let run = pipeline::run(&stt, &endpoint, audio, &opts, &rc, cancel, |event| match event {
@@ -864,6 +895,40 @@ mod tests {
         assert_eq!(server_timeout(5.0, 0), Duration::from_secs(45));
         assert_eq!(server_timeout(95.0, 2500), Duration::from_millis(61_500));
         assert_eq!(server_timeout(600.0, 0), Duration::from_secs(140));
+    }
+
+    #[test]
+    fn prewarm_only_remote_hosts_without_credentials() {
+        let el = "https://api.elevenlabs.io";
+        assert_eq!(
+            prewarm_urls(AppMode::Local, el, "https://api.deepseek.com/v1", "http://127.0.0.1:8787"),
+            vec!["https://api.elevenlabs.io/v1/models".to_owned(), "https://api.deepseek.com/v1/models".to_owned()]
+        );
+        assert_eq!(prewarm_urls(AppMode::Local, el, "http://127.0.0.1:3425/v1", ""), vec!["https://api.elevenlabs.io/v1/models".to_owned()]);
+        assert!(prewarm_urls(AppMode::Account, el, "", "http://127.0.0.1:8787").is_empty());
+        assert_eq!(prewarm_urls(AppMode::Account, el, "", "https://comma.example.com/"), vec!["https://comma.example.com/v1/health".to_owned()]);
+    }
+
+    /// Cold versus prewarmed upload of a 51 KB clip (an Opus-sized 13 s dictation) to ElevenLabs
+    /// through the app's HTTP client, without a key (the answer is 401 after the whole body):
+    /// `cargo test -p comma prewarm_measure -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn prewarm_measure() {
+        let body = vec![0u8; 51_218];
+        let post = |http: reqwest::Client, body: Vec<u8>| async move {
+            let t = Instant::now();
+            let form = reqwest::multipart::Form::new().text("model_id", "scribe_v3").part("file", reqwest::multipart::Part::bytes(body).file_name("a.ogg"));
+            let _ = http.post("https://api.elevenlabs.io/v1/speech-to-text").header("xi-api-key", "invalid").multipart(form).send().await.unwrap().bytes().await;
+            t.elapsed().as_millis()
+        };
+        for _ in 0..5 {
+            let cold = post(comma_voice::http::client(), body.clone()).await;
+            let http = comma_voice::http::client();
+            let _ = http.head("https://api.elevenlabs.io/v1/models").send().await;
+            let warm = post(http, body.clone()).await;
+            println!("cold {cold} ms, prewarmed {warm} ms");
+        }
     }
 
     #[test]

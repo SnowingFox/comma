@@ -80,7 +80,13 @@ impl ElevenLabs {
     }
 
     fn form(&self, audio: &Audio, language: Option<&str>, keyterms: &[String]) -> VoiceResult<Form> {
-        let extension = if audio.mime.contains("wav") { "wav" } else { "bin" };
+        let extension = if audio.mime.contains("wav") {
+            "wav"
+        } else if audio.mime.contains("ogg") {
+            "ogg"
+        } else {
+            "bin"
+        };
         let file = Part::bytes(audio.bytes.clone())
             .file_name(format!("audio.{extension}"))
             .mime_str(&audio.mime)
@@ -266,6 +272,14 @@ mod tests {
 
     fn client(server: &MockServer, model: &str) -> ElevenLabs {
         ElevenLabs::new(http::client(), "el-test-key", model).with_base_url(server.uri())
+    }
+
+    #[test]
+    fn timeout_grows_with_the_clip_also_for_ogg() {
+        assert_eq!(ElevenLabs::timeout(&Audio::wav(wav::test_clip())), Duration::from_secs(20));
+        assert_eq!(ElevenLabs::timeout(&Audio::ogg(b"OggS".to_vec(), 400.0)), Duration::from_secs(120));
+        // Unknown length: assume 30 s.
+        assert_eq!(ElevenLabs::timeout(&Audio { bytes: vec![], mime: "audio/ogg".into(), secs: None }), Duration::from_secs(27));
     }
 
     fn opts(languages: &[&str]) -> SttOptions {

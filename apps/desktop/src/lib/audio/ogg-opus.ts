@@ -129,44 +129,83 @@ export function opusSupported(): Promise<boolean> {
   return supported;
 }
 
-/** Encodes 16 kHz mono samples; null without an Opus encoder or on any encoder error. */
-export async function encodeOggOpus(samples: Float32Array, rate: number): Promise<Uint8Array | null> {
-  if (rate !== CONFIG.sampleRate || !(await opusSupported())) return null;
-  const packets: Packet[] = [];
-  let failed = false;
-  const encoder = new AudioEncoder({
-    output: (chunk) => {
-      const data = new Uint8Array(chunk.byteLength);
-      chunk.copyTo(data);
-      packets.push({ data, samples48k: Math.round(((chunk.duration ?? 20_000) * OPUS_RATE) / 1_000_000) });
-    },
-    error: () => {
-      failed = true;
-    },
-  });
-  try {
-    encoder.configure(CONFIG as unknown as AudioEncoderConfig);
-    // Feed in 1 s pieces so a long clip never makes one huge AudioData.
-    const step = rate;
-    for (let i = 0; i < samples.length; i += step) {
-      const part = samples.subarray(i, Math.min(samples.length, i + step));
+/**
+ * Encodes while the user talks, so stopping costs only the flush of the last frame instead of the
+ * whole clip (about 6 ms per second of audio in WKWebView). Feed 16 kHz samples with `push`.
+ */
+export class OpusStream {
+  private packets: Packet[] = [];
+  private failed = false;
+  private samples = 0;
+
+  private constructor(private readonly encoder: AudioEncoder) {}
+
+  /** null when the webview has no Opus encoder. */
+  static async create(): Promise<OpusStream | null> {
+    if (!(await opusSupported())) return null;
+    let stream: OpusStream | null = null;
+    try {
+      const encoder = new AudioEncoder({
+        output: (chunk) => {
+          const data = new Uint8Array(chunk.byteLength);
+          chunk.copyTo(data);
+          stream?.packets.push({ data, samples48k: Math.round(((chunk.duration ?? 20_000) * OPUS_RATE) / 1_000_000) });
+        },
+        error: () => {
+          if (stream) stream.failed = true;
+        },
+      });
+      encoder.configure(CONFIG as unknown as AudioEncoderConfig);
+      stream = new OpusStream(encoder);
+      return stream;
+    } catch {
+      return null;
+    }
+  }
+
+  push(samples: Float32Array) {
+    if (this.failed || samples.length === 0 || this.encoder.state !== "configured") return;
+    try {
       const data = new AudioData({
         format: "f32-planar",
-        sampleRate: rate,
-        numberOfFrames: part.length,
+        sampleRate: CONFIG.sampleRate,
+        numberOfFrames: samples.length,
         numberOfChannels: 1,
-        timestamp: Math.round((i / rate) * 1_000_000),
-        data: part.slice(),
+        timestamp: Math.round((this.samples / CONFIG.sampleRate) * 1_000_000),
+        data: samples.slice(),
       });
-      encoder.encode(data);
+      this.encoder.encode(data);
       data.close();
+      this.samples += samples.length;
+    } catch {
+      this.failed = true;
     }
-    await encoder.flush();
-  } catch {
-    failed = true;
-  } finally {
-    if (encoder.state !== "closed") encoder.close();
   }
-  if (failed || packets.length === 0) return null;
-  return muxOggOpus(packets, rate);
+
+  /** The Ogg/Opus file, or null when encoding failed (send WAV instead). */
+  async finish(): Promise<Uint8Array | null> {
+    try {
+      if (this.encoder.state === "configured") await this.encoder.flush();
+    } catch {
+      this.failed = true;
+    } finally {
+      this.close();
+    }
+    if (this.failed || this.packets.length === 0) return null;
+    return muxOggOpus(this.packets, CONFIG.sampleRate);
+  }
+
+  close() {
+    if (this.encoder.state !== "closed") this.encoder.close();
+  }
+}
+
+/** Encodes 16 kHz mono samples at once; null without an Opus encoder or on any encoder error. */
+export async function encodeOggOpus(samples: Float32Array, rate: number): Promise<Uint8Array | null> {
+  if (rate !== CONFIG.sampleRate) return null;
+  const stream = await OpusStream.create();
+  if (!stream) return null;
+  // 1 s pieces, so a long clip never makes one huge AudioData.
+  for (let i = 0; i < samples.length; i += rate) stream.push(samples.subarray(i, Math.min(samples.length, i + rate)));
+  return stream.finish();
 }
