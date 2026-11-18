@@ -10,6 +10,7 @@ authors = ["Comma contributors"]
 
 [workspace.dependencies]
 comma-voice = { path = "crates/comma-voice" }
+comma-input = { path = "crates/comma-input" }
 # rustls only, no system proxy lookup: local endpoints must never be proxied.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "charset", "json", "multipart"] }
 serde = { version = "1", features = ["derive"] }

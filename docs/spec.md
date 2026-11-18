@@ -167,22 +167,47 @@ comma/
 
 ### 3.3 IPC contract (commands and events)
 
-Commands (frontend -> Rust), all return `Result<T, AppError { code, message }>`:
+The schemas are in `packages/shared/src/ipc/` (`commands.ts`, `events.ts`, `settings.ts`); this table lists what
+exists. Commands (frontend -> Rust) all return `Result<T, AppError { code, message, reason? }>`:
 
 | Command | Purpose |
 |---|---|
-| `settings_get() -> Settings` / `settings_set(patch)` | Non-secret settings |
-| `secret_set(name, value)` / `secret_status() -> { elevenlabs: bool, llm: bool }` | Keychain; values are never returned |
-| `stt_test() -> TestResult`, `llm_test() -> TestResult`, `llm_models() -> string[]` | Connection tests |
-| `pipeline_run({ mode, wav_base64, target_language? }) -> RunResult` | Full run; also emits progress events |
-| `runs_list(query)`, `run_get(id)`, `run_delete(id)`, `run_rerun(id)` | History |
-| `usage_summary(range)`, `usage_daily(range)`, `usage_export_csv(range)` | Usage |
-| `dictionary_list/add/update/delete/import_csv` | Dictionary |
-| `permissions_status() -> { microphone, accessibility }`, `open_settings_pane(kind)` | Permissions |
-| `shortcuts_set(map)` | Re-register shortcuts |
+| `settings_get() -> Settings` / `settings_set(patch) -> Settings` | Non-secret settings; nested objects merge one level deep. Changing shortcuts re-registers them |
+| `secret_set(name, value)` / `secret_status() -> { elevenlabs, llm }` | Keychain; values are never returned; an empty value deletes |
+| `permissions_status() -> { microphone, accessibility, input_monitoring }`, `open_settings_pane(kind)`, `input_monitoring_request() -> bool` | Permissions; `kind` is `microphone`, `accessibility`, `input_monitoring` or `keyboard` |
+| `window_show(label)`, `window_hide(label)` | `hub`, `onboarding`, `bar` |
+| `llm_models(base_url?) -> string[]`, `llm_test(base_url?, model?, reasoning_effort?)`, `stt_test()` | Connection tests (first-token latency, precise errors) |
+| `stt_transcribe(wav_base64) -> Transcription`, `refine_text(mode, text, target_language?, selected_text?) -> RefineResult` | Single stages, used by the onboarding microphone test |
+| `account_check(server_url?)`, `account_register`, `account_verify_email`, `account_resend_code`, `account_sign_in -> AccountStatus`, `account_status`, `account_sign_out`, `account_credits -> Credits` | Comma account; tokens stay in the Keychain, refreshed on 401 |
+| `shortcuts_status() -> ShortcutsStatus` | `listener` (`fn` or `fallback`), the shortcut each mode answers to now, registration errors, the Globe key setting |
+| `shortcuts_capture(owner)` | While the onboarding window is focused, shortcut events go to it instead of the bar |
+| `shortcuts_suspend(suspended)` | Shortcut recorder open: nothing is registered or matched, so its keys reach the window |
+| `pipeline_run({ mode, audio_base64, audio_secs?, source, target_language?, selected_text?, record_ms? }) -> RunResult` | Full run (Local or Comma account), WAV or Ogg/Opus; output (paste, copy, answer), history, hints; emits progress events |
+| `pipeline_cancel()` | Stops the run in flight |
+| `output_insert(text) -> RunOutput`, `clipboard_copy(text)` | Answer card Insert and Copy |
+| `bar_layout(layout, interactive, escape?)`, `bar_menu()` | Bar window size and position (`hidden`, `dot`, `full`) on the screen with the mouse; the right-click menu |
+| `hint_take(kind) -> bool`, `hints_reset()` | Bar hints: may it show now (counted), and start the counts over |
+| `runs_list({ search?, before?, limit? })`, `run_get(id)`, `run_delete(id)`, `runs_clear()`, `run_rerun(id)`, `run_audio(id)` | History |
+| `usage_summary(range)`, `usage_daily(range)`, `usage_export_csv(range) -> { path }` | Usage; `range` is `today`, `7d`, `30d`, `90d` |
+| `dictionary_list`, `dictionary_add(term)`, `dictionary_update(id, term)`, `dictionary_delete(id)`, `dictionary_import_csv(csv)` | Dictionary: local terms in Local mode, the server's in account mode |
 
-Events (Rust -> frontend): `shortcut://down|up|cancel { mode }`, `run://stage { id, stage: stt|llm|paste, ms }`,
-`run://delta { id, text }`, `run://done { id, result }`, `run://error { id, code, message }`.
+Events (Rust -> frontend, and window to window):
+
+| Event | Payload | Notes |
+|---|---|---|
+| `shortcut://down`, `shortcut://up`, `shortcut://cancel` | `{ mode }` | To the bar, or to onboarding while it captures |
+| `shortcut://switch` | `{ mode, hands_free }` | Mode changed mid-recording (Fn, then Space), or hands-free locked |
+| `shortcut://keys` | `{ held }` | Only configured keys, for the keyboard test |
+| `run://stage` | `{ id, stage: stt\|llm\|paste, ms }` | |
+| `run://delta` | `{ id, text }` | Streamed rewrite (Local mode) |
+| `run://done` | `{ id, result }` | |
+| `run://error` | `{ id, code, message, reason? }` | `reason` such as `quota_exceeded`, `signed_out` |
+| `bar://hint` | `{ kind }` | Hint to show (already counted) |
+| `bar://preview` | `{ state, mode?, message? }` | Dev only |
+| `history://changed` | `{ id? }` | The hub refetches |
+| `hub://open` | `{ page, section? }` | Bar -> hub: Details, Sign in |
+| `settings://changed` | `{}` | Another window or Rust changed settings |
+| `onboarding://restart` | `{ step? }` | Hub -> onboarding |
 
 ## 4. Quality bar
 

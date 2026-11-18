@@ -7,7 +7,7 @@ import { useSettings } from "../../../lib/queries";
 import { useStepControls } from "../flow";
 import { Split } from "./layout";
 
-const DATA: Record<AppMode, { title: string; rows: { what: string; where: string }[] }> = {
+export const DATA_FLOWS: Record<AppMode, { title: string; rows: { what: string; where: string }[] }> = {
   local: {
     title: "With your own keys",
     rows: [
@@ -29,7 +29,7 @@ const DATA: Record<AppMode, { title: string; rows: { what: string; where: string
 function DataPanel() {
   const mode = useSettings().data?.mode ?? "local";
   const [tab, setTab] = useState<AppMode>(mode);
-  const data = DATA[tab];
+  const data = DATA_FLOWS[tab];
   return (
     <div className="flex h-full w-full flex-col gap-3.5 self-stretch">
       <div className="flex flex-col gap-2.5">
@@ -70,15 +70,16 @@ export function PermissionsStep() {
   useStepControls({});
   return (
     <Split
-      title="Two permissions"
+      title="Three permissions"
       lead="macOS asks once for each. The rows turn green as soon as you allow them."
       art={<DataPanel />}
       artClassName="items-stretch bg-app-shell p-5"
     >
       <PermissionList />
       <p className="text-caption text-muted-foreground">
-        Comma never watches the rest of your keyboard and reads nothing from other apps outside a run you start. You can
-        change these later in System Settings, Privacy & Security.
+        Input Monitoring is how macOS lets an app see the Fn key. Comma looks only at its shortcut keys and Esc; every
+        other key is ignored the moment it arrives and never stored or sent. Without it, Comma uses ⌥ Space and the
+        other ordinary shortcuts instead. You can change these later in System Settings, Privacy & Security.
       </p>
     </Split>
   );

@@ -14,10 +14,12 @@ use crate::wav;
 pub use elevenlabs::{ELEVENLABS_BASE_URL, ElevenLabs, sanitize_keyterms};
 
 /// An audio clip to transcribe.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 pub struct Audio {
     pub bytes: Vec<u8>,
     pub mime: String,
+    /// Length in seconds when the container does not say it cheaply (Ogg/Opus from the app).
+    pub secs: Option<f64>,
 }
 
 impl std::fmt::Debug for Audio {
@@ -28,12 +30,19 @@ impl std::fmt::Debug for Audio {
 
 impl Audio {
     pub fn wav(bytes: Vec<u8>) -> Self {
-        Self { bytes, mime: "audio/wav".into() }
+        Self { bytes, mime: "audio/wav".into(), secs: None }
     }
 
-    /// Length from the WAV header, when it is a PCM WAV.
+    /// Ogg/Opus with its length, which the caller knows from the recording.
+    pub fn ogg(bytes: Vec<u8>, secs: f64) -> Self {
+        Self { bytes, mime: "audio/ogg".into(), secs: Some(secs) }
+    }
+
+    /// Length from the WAV header, or the length given with the audio.
     pub fn duration(&self) -> Option<Duration> {
-        wav::duration_secs(&self.bytes).map(Duration::from_secs_f64)
+        wav::duration_secs(&self.bytes)
+            .or(self.secs.filter(|s| s.is_finite() && *s >= 0.0))
+            .map(Duration::from_secs_f64)
     }
 }
 
@@ -164,5 +173,6 @@ mod tests {
         let audio = Audio::wav(wav::test_clip());
         assert_eq!(format!("{audio:?}"), "Audio { bytes: 32044, mime: \"audio/wav\" }");
         assert_eq!(audio.duration(), Some(Duration::from_secs(1)));
+        assert_eq!(Audio::ogg(b"OggS".to_vec(), 2.5).duration(), Some(Duration::from_millis(2500)));
     }
 }

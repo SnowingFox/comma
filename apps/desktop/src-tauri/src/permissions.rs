@@ -17,6 +17,8 @@ pub enum PermissionState {
 pub struct PermissionsStatus {
     pub microphone: PermissionState,
     pub accessibility: PermissionState,
+    /// For the Fn shortcuts.
+    pub input_monitoring: PermissionState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -24,6 +26,9 @@ pub struct PermissionsStatus {
 pub enum SettingsPaneKind {
     Microphone,
     Accessibility,
+    InputMonitoring,
+    /// Keyboard settings, for "Press Globe key to".
+    Keyboard,
 }
 
 impl SettingsPaneKind {
@@ -36,12 +41,18 @@ impl SettingsPaneKind {
             SettingsPaneKind::Accessibility => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
             }
+            SettingsPaneKind::InputMonitoring => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+            }
+            SettingsPaneKind::Keyboard => "x-apple.systempreferences:com.apple.Keyboard-Settings.extension",
         }
     }
 }
 
 pub fn status() -> PermissionsStatus {
-    PermissionsStatus { microphone: platform::microphone(), accessibility: platform::accessibility() }
+    let input_monitoring =
+        if comma_input::input_monitoring_granted() { PermissionState::Granted } else { PermissionState::Denied };
+    PermissionsStatus { microphone: platform::microphone(), accessibility: platform::accessibility(), input_monitoring }
 }
 
 pub fn open_pane(kind: SettingsPaneKind) -> AppResult<()> {
@@ -79,7 +90,7 @@ mod platform {
     }
 
     pub fn open_url(url: &str) -> AppResult<()> {
-        // `url` is one of the two constants above, never user input.
+        // `url` is one of the constants above, never user input.
         let status = std::process::Command::new("/usr/bin/open").arg(url).status()?;
         if status.success() {
             Ok(())
@@ -115,15 +126,18 @@ mod tests {
         let json = serde_json::to_value(PermissionsStatus {
             microphone: PermissionState::NotDetermined,
             accessibility: PermissionState::Granted,
+            input_monitoring: PermissionState::Denied,
         })
         .unwrap();
-        assert_eq!(json, serde_json::json!({ "microphone": "not_determined", "accessibility": "granted" }));
+        assert_eq!(json, serde_json::json!({ "microphone": "not_determined", "accessibility": "granted", "input_monitoring": "denied" }));
     }
 
     #[test]
     fn pane_kinds_parse_and_link_to_privacy() {
         let kind: SettingsPaneKind = serde_json::from_str("\"accessibility\"").unwrap();
         assert!(kind.url().ends_with("Privacy_Accessibility"));
+        let kind: SettingsPaneKind = serde_json::from_str("\"input_monitoring\"").unwrap();
+        assert!(kind.url().ends_with("Privacy_ListenEvent"));
         assert!(serde_json::from_str::<SettingsPaneKind>("\"camera\"").is_err());
     }
 

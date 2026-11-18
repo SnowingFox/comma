@@ -1,5 +1,9 @@
 // `no-inline`: the CSP allows scripts from the app only, so the worklet must be a file, not a data: URL.
 import workletUrl from "./pcm-worklet.js?url&no-inline";
+import { encodeOggOpus, type OpusStream } from "./ogg-opus";
+import { StreamResampler } from "./resample";
+
+export { resample, StreamResampler } from "./resample";
 
 /** ElevenLabs takes any rate; 16 kHz mono keeps uploads small (spec 3.1). */
 export const TARGET_RATE = 16_000;
@@ -11,7 +15,9 @@ export type Recording = { wavBase64: string; durationSecs: number; peak: number 
  * stream is open (for meters); samples are kept only between `start()` and `stop()`.
  */
 export class Recorder {
+  /** 16 kHz pieces since `start()`, resampled as they arrive. */
   private chunks: Float32Array[] = [];
+  private resampler: StreamResampler | null = null;
   private capturing = false;
   private peak = 0;
 
@@ -24,6 +30,8 @@ export class Recorder {
 
   /** Level from 0 to 1 on a -60..0 dBFS scale, about 23 times a second. */
   onLevel: ((level: number) => void) | undefined;
+  /** Each new 16 kHz piece while recording, e.g. for an encoder that runs while the user talks. */
+  onSamples: ((samples: Float32Array) => void) | undefined;
 
   static async open(deviceId?: string): Promise<Recorder> {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -62,9 +70,11 @@ export class Recorder {
     const rms = Math.sqrt(sum / chunk.length);
     const db = 20 * Math.log10(Math.max(rms, 1e-6));
     this.onLevel?.(Math.min(1, Math.max(0, (db + 60) / 60)));
-    if (this.capturing) {
-      this.chunks.push(chunk);
+    if (this.capturing && this.resampler) {
+      const piece = this.resampler.push(chunk);
+      this.chunks.push(piece);
       this.peak = Math.max(this.peak, peak);
+      this.onSamples?.(piece);
     }
   }
 
@@ -74,20 +84,29 @@ export class Recorder {
 
   start() {
     this.chunks = [];
+    this.resampler = new StreamResampler(this.context.sampleRate, TARGET_RATE);
     this.peak = 0;
     this.capturing = true;
   }
 
   stop(): Recording {
+    const { samples, peak } = this.stopSamples();
+    return { wavBase64: toBase64(encodeWav(samples, TARGET_RATE)), durationSecs: samples.length / TARGET_RATE, peak };
+  }
+
+  /** 16 kHz samples captured since `start()`. */
+  stopSamples(): { samples: Float32Array; peak: number } {
     this.capturing = false;
-    const samples = resample(concat(this.chunks), this.context.sampleRate, TARGET_RATE);
+    const samples = concat(this.chunks);
     this.chunks = [];
-    return { wavBase64: toBase64(encodeWav(samples, TARGET_RATE)), durationSecs: samples.length / TARGET_RATE, peak: this.peak };
+    this.resampler = null;
+    return { samples, peak: this.peak };
   }
 
   close() {
     this.capturing = false;
     this.onLevel = undefined;
+    this.onSamples = undefined;
     for (const node of this.nodes) node.disconnect();
     for (const track of this.stream.getTracks()) track.stop();
     void this.context.close();
@@ -106,20 +125,6 @@ function concat(chunks: Float32Array[]): Float32Array {
   for (const c of chunks) {
     out.set(c, offset);
     offset += c.length;
-  }
-  return out;
-}
-
-/** Linear interpolation; good enough for speech going to a recogniser. */
-export function resample(input: Float32Array, from: number, to: number): Float32Array {
-  if (from === to || input.length === 0) return input;
-  const ratio = from / to;
-  const out = new Float32Array(Math.floor(input.length / ratio));
-  for (let i = 0; i < out.length; i++) {
-    const pos = i * ratio;
-    const j = Math.floor(pos);
-    const frac = pos - j;
-    out[i] = (input[j] ?? 0) * (1 - frac) + (input[j + 1] ?? input[j] ?? 0) * frac;
   }
   return out;
 }
@@ -146,7 +151,26 @@ export function encodeWav(samples: Float32Array, rate: number): Uint8Array {
   return bytes;
 }
 
-function toBase64(bytes: Uint8Array): string {
+export type EncodedClip = { base64: string; format: "ogg" | "wav"; bytes: number; durationSecs: number; encodeMs: number };
+
+/**
+ * Ogg/Opus when the webview can encode it (about 8x smaller), else WAV. With `stream`, the encoder
+ * that ran during the recording only flushes its last frame.
+ */
+export async function encodeClip(samples: Float32Array, stream?: OpusStream | null): Promise<EncodedClip> {
+  const started = performance.now();
+  const ogg = stream ? await stream.finish() : await encodeOggOpus(samples, TARGET_RATE);
+  const bytes = ogg ?? encodeWav(samples, TARGET_RATE);
+  return {
+    base64: toBase64(bytes),
+    format: ogg ? "ogg" : "wav",
+    bytes: bytes.length,
+    durationSecs: samples.length / TARGET_RATE,
+    encodeMs: performance.now() - started,
+  };
+}
+
+export function toBase64(bytes: Uint8Array): string {
   let binary = "";
   const step = 0x8000;
   for (let i = 0; i < bytes.length; i += step) binary += String.fromCharCode(...bytes.subarray(i, i + step));

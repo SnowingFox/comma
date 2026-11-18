@@ -1,16 +1,17 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { match } from "ts-pattern";
-import { LlmBaseUrl, MAGPIE_BASE_URL, ReasoningEffort, type LlmSettings } from "@comma/shared/ipc";
+import { LlmBaseUrl, MAGPIE_BASE_URL, ReasoningEffort, type LlmSettings, type LlmTestResult } from "@comma/shared/ipc";
 import { Button } from "@multica/ui/components/ui/button";
 import { Input } from "@multica/ui/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@multica/ui/components/ui/select";
 import { RefreshCw } from "@multica/ui/icons";
 import { cn } from "@multica/ui/lib/utils";
-import { plural } from "../lib/format";
-import { errorMessage } from "../lib/ipc";
+import { formatMs, plural } from "../lib/format";
+import { errorMessage, invoke } from "../lib/ipc";
+import { rememberLatency } from "../lib/models";
 import { useLlmTest, useModels, useSettings, useUpdateSettings } from "../lib/queries";
 import { ModelPicker } from "./model-picker";
-import { describeLlmTest, ProviderTest } from "./provider-test";
+import { describeLlmTest, ProviderTest, TestResultRow } from "./provider-test";
 import { SecretField } from "./secret-field";
 import { StatusDot, type DotTone } from "./status-dot";
 
@@ -156,6 +157,70 @@ export function MagpieStatus({ models, onCustom, className }: { models: ModelsQu
   );
 }
 
+const COMPARE_EFFORTS: ReasoningEffort[] = ["off", "low", "medium", "high"];
+
+type CompareRow = { effort: ReasoningEffort; result?: LlmTestResult; error?: string };
+
+/** Runs one Test per reasoning effort, one after another, for the picked model. */
+function useCompareEfforts() {
+  const [rows, setRows] = useState<CompareRow[] | null>(null);
+  const [running, setRunning] = useState(false);
+  const run = useRef(0);
+
+  const start = async (base_url: string, model: string) => {
+    const id = ++run.current;
+    setRunning(true);
+    setRows(COMPARE_EFFORTS.map((effort) => ({ effort })));
+    for (const effort of COMPARE_EFFORTS) {
+      let row: CompareRow;
+      try {
+        const result = await invoke("llm_test", { base_url, model, reasoning_effort: effort });
+        if (result.ttft_ms != null) rememberLatency(base_url, model, effort, result.ttft_ms);
+        row = { effort, result };
+      } catch (err) {
+        row = { effort, error: errorMessage(err) };
+      }
+      if (id !== run.current) return;
+      setRows((rs) => rs?.map((r) => (r.effort === effort ? row : r)) ?? null);
+    }
+    if (id === run.current) setRunning(false);
+  };
+  const reset = () => {
+    run.current += 1;
+    setRows(null);
+    setRunning(false);
+  };
+  return { rows, running, start, reset };
+}
+
+function CompareRows({ rows }: { rows: CompareRow[] }) {
+  return (
+    <div className="flex flex-col gap-1.5 rounded-lg border border-border px-3 py-2.5" aria-live="polite">
+      <span className="text-caption font-medium text-muted-foreground">Reasoning effort compared</span>
+      {rows.map((r) => (
+        <div key={r.effort} className="grid grid-cols-[64px_minmax(0,1fr)] items-baseline gap-2">
+          <span className="text-label font-medium">{REASONING_LABELS[r.effort]}</span>
+          {r.result ? (
+            <TestResultRow tone="ok">
+              {[
+                r.result.ttft_ms != null ? `first token ${formatMs(r.result.ttft_ms)}` : "no content",
+                `total ${formatMs(r.result.total_ms)}`,
+                r.result.reasoning_tokens ? `${r.result.reasoning_tokens} reasoning tokens` : null,
+              ]
+                .filter(Boolean)
+                .join(", ")}
+            </TestResultRow>
+          ) : r.error ? (
+            <TestResultRow tone="error">{r.error}</TestResultRow>
+          ) : (
+            <TestResultRow tone="muted">Waiting…</TestResultRow>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /**
  * The rewrite provider: magpie (detected live) or a custom OpenAI-compatible endpoint, a model
  * picker fed by `/models`, and a Test button. Used by onboarding and Settings.
@@ -178,18 +243,22 @@ export function LlmProviderFields({
   const customModels = useModels(customUrl, { enabled: !magpie });
   const test = useLlmTest();
   const testReset = test.reset;
+  const compare = useCompareEfforts();
+  const compareReset = useRef(compare.reset);
+  compareReset.current = compare.reset;
 
   // A result belongs to the endpoint and model it was run with.
   useEffect(() => testReset(), [draft?.base_url, draft?.model, draft?.reasoning_effort, testReset]);
+  useEffect(() => compareReset.current(), [draft?.base_url, draft?.model]);
 
   if (!draft) return null;
   const models = magpie ? magpieModels : customModels;
+  const baseUrl = draft.base_url.trim();
   const runTest = () =>
-    test.mutate({
-      base_url: draft.base_url.trim(),
-      model: draft.model.trim() || undefined,
-      reasoning_effort: draft.reasoning_effort,
-    });
+    test.mutate(
+      { base_url: baseUrl, model: draft.model.trim() || undefined, reasoning_effort: draft.reasoning_effort },
+      { onSuccess: (r) => r.ttft_ms != null && rememberLatency(baseUrl, r.model || draft.model.trim(), draft.reasoning_effort, r.ttft_ms) },
+    );
   const blocked = match({ magpie, models: models.status, model: draft.model.trim(), urlError })
     .with({ magpie: true, models: "error" }, () => "Start magpie first")
     .with({ magpie: false, urlError: undefined, model: "" }, () => "Enter a model first")
@@ -255,6 +324,7 @@ export function LlmProviderFields({
             models={models.data}
             value={draft.model}
             onChange={(model) => setDraft({ model })}
+            baseUrl={baseUrl}
             disabled={magpie && models.status !== "success"}
           />
           {!magpie && customModels.status === "error" ? (
@@ -289,7 +359,26 @@ export function LlmProviderFields({
         ) : null}
       </div>
 
-      <ProviderTest state={test} onTest={runTest} describe={describeLlmTest} disabled={!!blocked} disabledReason={blocked} />
+      <ProviderTest
+        state={test}
+        onTest={runTest}
+        describe={describeLlmTest}
+        disabled={!!blocked}
+        disabledReason={blocked}
+        extra={
+          <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="shrink-0"
+              disabled={!!blocked || compare.running}
+              onClick={() => void compare.start(baseUrl, draft.model.trim())}
+            >
+              Compare efforts
+            </Button>
+        }
+      />
+      {compare.rows ? <CompareRows rows={compare.rows} /> : null}
     </div>
   );
 }

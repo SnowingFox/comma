@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { RunMode } from "./events";
+import { HintKind, RunMode, RunOutput, RunResult } from "./events";
 import { LanguageTag, LlmBaseUrl, ReasoningEffort, Settings, SettingsPatch } from "./settings";
 
 /** Keychain entries. Values are write-only from the frontend. */
@@ -21,11 +21,13 @@ export const PermissionsStatus = z.object({
   microphone: PermissionState,
   /** AXIsProcessTrusted: `granted` or `denied`. */
   accessibility: PermissionState,
+  /** CGPreflightListenEventAccess, for the Fn shortcuts: `granted` or `denied`. */
+  input_monitoring: PermissionState,
 });
 export type PermissionsStatus = z.infer<typeof PermissionsStatus>;
 
 /** The System Settings Privacy pane to open. */
-export const SettingsPaneKind = z.enum(["microphone", "accessibility"]);
+export const SettingsPaneKind = z.enum(["microphone", "accessibility", "input_monitoring", "keyboard"]);
 export type SettingsPaneKind = z.infer<typeof SettingsPaneKind>;
 
 export const WindowLabel = z.enum(["hub", "onboarding", "bar"]);
@@ -114,6 +116,113 @@ export type OnboardingStep = z.infer<typeof OnboardingStep>;
 
 const Email = z.string().trim().min(3).max(320);
 
+/** How the shortcuts are listened for right now. */
+export const ShortcutsStatus = z.object({
+  /** `fn`: the modifier listener runs (Input Monitoring allowed). `fallback`: only ordinary shortcuts are registered. */
+  listener: z.enum(["fn", "fallback"]),
+  /** The shortcut each mode answers to now: the configured one, or its fallback while Fn cannot be used. */
+  active: z.object({ dictate: z.string(), ask: z.string(), translate: z.string() }),
+  /** Modes whose shortcut could not be registered (taken by another app), with the reason. */
+  errors: z.array(z.object({ mode: RunMode, message: z.string() })),
+  /**
+   * System Settings > Keyboard > "Press Globe key to". Comma cannot stop that action, so anything but `none` also
+   * opens the emoji picker, switches input source or starts macOS dictation when Fn is pressed.
+   */
+  globe_key: z.enum(["none", "input_source", "emoji", "dictation", "unknown"]),
+});
+export type ShortcutsStatus = z.infer<typeof ShortcutsStatus>;
+
+export const RunSource = z.enum(["bar", "onboarding"]);
+export type RunSource = z.infer<typeof RunSource>;
+
+/** One run in the local history (spec 3.2 `runs`). Times are milliseconds, `ts` is Unix ms. */
+export const RunRecord = z.object({
+  id: z.string(),
+  ts: z.number().int(),
+  mode: RunMode,
+  /** `local` (your keys) or `comma` (account credits). */
+  provider: z.enum(["local", "comma"]),
+  app: z.string().nullable(),
+  raw_text: z.string(),
+  refined_text: z.string(),
+  language: z.string().nullable(),
+  model: z.string().nullable(),
+  audio_secs: z.number().nonnegative(),
+  stt_ms: Ms.nullable(),
+  llm_ttft_ms: Ms.nullable(),
+  llm_total_ms: Ms.nullable(),
+  total_ms: Ms.nullable(),
+  prompt_tokens: z.number().int().nonnegative().nullable(),
+  completion_tokens: z.number().int().nonnegative().nullable(),
+  stt_cost_usd: z.number().nonnegative().nullable(),
+  words: z.number().int().nonnegative(),
+  ok: z.boolean(),
+  error: z.string().nullable(),
+  output: z.string().nullable(),
+  has_audio: z.boolean(),
+});
+export type RunRecord = z.infer<typeof RunRecord>;
+
+export const RunsQuery = z
+  .object({
+    /** Matches raw or refined text and the app name. */
+    search: z.string().max(200).optional(),
+    /** Unix ms; only runs before it (paging). */
+    before: z.number().int().optional(),
+    limit: z.number().int().min(1).max(500).optional(),
+  })
+  .strict();
+export type RunsQuery = z.infer<typeof RunsQuery>;
+
+/** Local calendar days: today, or the last 7 / 30 / 90 days including today. */
+export const UsageRange = z.enum(["today", "7d", "30d", "90d"]);
+export type UsageRange = z.infer<typeof UsageRange>;
+
+export const UsageTotals = z.object({
+  runs: z.number().int().nonnegative(),
+  errors: z.number().int().nonnegative(),
+  words: z.number().int().nonnegative(),
+  audio_secs: z.number().nonnegative(),
+  stt_cost_usd: z.number().nonnegative(),
+  prompt_tokens: z.number().int().nonnegative(),
+  completion_tokens: z.number().int().nonnegative(),
+});
+export type UsageTotals = z.infer<typeof UsageTotals>;
+
+export const UsageBreakdown = z.array(UsageTotals.extend({ key: z.string() }));
+export type UsageBreakdown = z.infer<typeof UsageBreakdown>;
+
+const Percentiles = z.object({ p50: Ms.nullable(), p95: Ms.nullable() });
+
+export const UsageSummary = z.object({
+  range: UsageRange,
+  totals: UsageTotals,
+  by_mode: UsageBreakdown,
+  by_model: UsageBreakdown,
+  by_app: UsageBreakdown,
+  stages: z.object({ stt: Percentiles, llm_ttft: Percentiles, llm_total: Percentiles, total: Percentiles }),
+});
+export type UsageSummary = z.infer<typeof UsageSummary>;
+
+/** One entry per local day in the range, oldest first, days without runs included. */
+export const UsageDay = UsageTotals.extend({ date: z.string() });
+export type UsageDay = z.infer<typeof UsageDay>;
+
+/** A dictionary term, local (Local mode) or on the Comma server (account mode). */
+export const DictionaryEntry = z.object({ id: z.string(), term: z.string(), created_at: z.string() });
+export type DictionaryEntry = z.infer<typeof DictionaryEntry>;
+
+const Term = z.string().trim().min(1).max(100);
+
+/** `GET /v1/me/credits` for the signed-in account. */
+export const Credits = z.object({
+  plan: z.string(),
+  period_end: z.string(),
+  used_seconds: z.number().nonnegative(),
+  limit_seconds: z.number().nonnegative(),
+});
+export type Credits = z.infer<typeof Credits>;
+
 /**
  * Commands, frontend -> Rust (spec 3.3). `args` is what the frontend passes to
  * `invoke` (Tauri maps the top-level keys to the Rust parameter names), `result`
@@ -174,6 +283,84 @@ export const commands = {
   /** Renews an expired access token with the refresh token. */
   account_status: { args: NoArgs, result: AccountStatus },
   account_sign_out: { args: NoArgs, result: Unit },
+  /** This week's Comma credits; fails when signed out. */
+  account_credits: { args: NoArgs, result: Credits },
+
+  /** Asks macOS for Input Monitoring (adds Comma to the list and shows the prompt once). Resolves with whether it is allowed. */
+  input_monitoring_request: { args: NoArgs, result: z.boolean() },
+  shortcuts_status: { args: NoArgs, result: ShortcutsStatus },
+  /** While `owner` is focused, shortcut events go only to it (onboarding try steps); null gives them back to the bar. */
+  shortcuts_capture: { args: z.object({ owner: z.enum(["onboarding"]).nullable() }).strict(), result: Unit },
+  /** While the shortcut recorder is open: nothing is registered or matched, so its keys reach the window. */
+  shortcuts_suspend: { args: z.object({ suspended: z.boolean() }).strict(), result: Unit },
+
+  /**
+   * A full run: speech to text and the rewrite (your keys, or the Comma server in account mode), then the output
+   * (paste, copy, or an answer), saved to history. `bar` uses the context captured when the shortcut went down;
+   * `onboarding` passes `selected_text` itself and is never pasted. Emits `run://stage|delta|done|error`.
+   */
+  pipeline_run: {
+    args: z
+      .object({
+        mode: RunMode,
+        /** 16-bit mono WAV, or Ogg/Opus (then `audio_secs` is required), base64. */
+        audio_base64: z.string().min(1).max(36_000_000),
+        audio_secs: z.number().nonnegative().max(3600).optional(),
+        source: RunSource,
+        target_language: LanguageTag.optional(),
+        selected_text: z.string().max(100_000).optional(),
+        /** Milliseconds the window spent recording and encoding. */
+        record_ms: z.number().nonnegative().max(3_600_000).optional(),
+      })
+      .strict(),
+    result: RunResult,
+  },
+  /** Stops the run in flight, if any. */
+  pipeline_cancel: { args: NoArgs, result: Unit },
+  /** Pastes `text` into the app that was focused when the run started (answer card Insert). */
+  output_insert: { args: z.object({ text: z.string().min(1).max(100_000) }).strict(), result: RunOutput },
+  /** Puts `text` on the clipboard. */
+  clipboard_copy: { args: z.object({ text: z.string().max(100_000) }).strict(), result: Unit },
+
+  /**
+   * Floating bar window: `dot` is a small window for the idle dot, `full` has room for the pill, a hint and the answer
+   * card. `interactive` lets it take clicks (cards, hints); `escape` listens for Esc to close a card.
+   */
+  bar_layout: {
+    args: z.object({ layout: z.enum(["hidden", "dot", "full"]), interactive: z.boolean(), escape: z.boolean().optional() }).strict(),
+    result: Unit,
+  },
+  /** The bar's right-click menu: copy last result, output language, open Comma. */
+  bar_menu: { args: NoArgs, result: Unit },
+  /** Whether hint `kind` may show now (hints on and under its limit); counts it when it may. */
+  hint_take: { args: z.object({ kind: HintKind }).strict(), result: z.boolean() },
+  /** Forgets how often each hint was shown, so the teaching hints show again. */
+  hints_reset: { args: NoArgs, result: Unit },
+
+  runs_list: { args: RunsQuery, result: z.array(RunRecord) },
+  run_get: { args: z.object({ id: z.string().max(64) }).strict(), result: RunRecord },
+  run_delete: { args: z.object({ id: z.string().max(64) }).strict(), result: Unit },
+  runs_clear: { args: NoArgs, result: Unit },
+  /** Rewrites the stored raw text again with the current LLM settings (Local mode); updates the entry. */
+  run_rerun: { args: z.object({ id: z.string().max(64) }).strict(), result: RunRecord },
+  /** The kept WAV of a run as base64, when Keep audio was on. */
+  run_audio: { args: z.object({ id: z.string().max(64) }).strict(), result: z.string() },
+
+  usage_summary: { args: z.object({ range: UsageRange }).strict(), result: UsageSummary },
+  usage_daily: { args: z.object({ range: UsageRange }).strict(), result: z.array(UsageDay) },
+  /** Writes the range's runs as CSV to ~/Downloads and resolves with the file path. */
+  usage_export_csv: { args: z.object({ range: UsageRange }).strict(), result: z.object({ path: z.string() }) },
+
+  /** Local terms in Local mode, the server's in account mode; oldest first. */
+  dictionary_list: { args: NoArgs, result: z.array(DictionaryEntry) },
+  dictionary_add: { args: z.object({ term: Term }).strict(), result: DictionaryEntry },
+  dictionary_update: { args: z.object({ id: z.string().max(64), term: Term }).strict(), result: DictionaryEntry },
+  dictionary_delete: { args: z.object({ id: z.string().max(64) }).strict(), result: Unit },
+  /** First column of each row is a term; a `term` header row is skipped; duplicates are skipped. */
+  dictionary_import_csv: {
+    args: z.object({ csv: z.string().max(200_000) }).strict(),
+    result: z.object({ added: z.number().int().nonnegative(), skipped: z.number().int().nonnegative() }),
+  },
 } as const;
 
 export type Commands = typeof commands;

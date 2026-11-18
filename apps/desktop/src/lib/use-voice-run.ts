@@ -1,41 +1,43 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { match } from "ts-pattern";
-import type { RefineResult, RunMode, Transcription } from "@comma/shared/ipc";
-import { Recorder } from "./audio/recorder";
-import { errorMessage, invoke } from "./ipc";
+import type { RunMode, RunResult } from "@comma/shared/ipc";
+import { encodeClip, Recorder } from "./audio/recorder";
+import { errorMessage, inTauri, invoke, IpcError } from "./ipc";
+import { useSettings } from "./queries";
 import { useShortcutHold } from "./shortcut";
+import { useCaptureShortcuts, useShortcutEvents } from "./shortcut-events";
 
 export type VoicePhase =
   | { kind: "idle" }
-  | { kind: "recording"; startedAt: number }
-  | { kind: "transcribing" }
-  | { kind: "refining"; raw: Transcription }
-  | { kind: "done"; raw: Transcription; refined: RefineResult }
+  | { kind: "recording"; startedAt: number; handsFree: boolean }
+  | { kind: "processing" }
+  | { kind: "done"; result: RunResult }
   /** Silence or a press too short to hold speech: a soft note, not an error (spec 2.1). */
   | { kind: "empty"; message: string }
   | { kind: "error"; message: string };
 
 export type RunContext = { selected_text?: string; target_language?: string };
 
-const MAX_SECS = 60;
+const MAX_SECS = 120;
 /** Peak below this (about -46 dBFS) is treated as silence. */
-const SILENCE_PEAK = 0.005;
+export const SILENCE_PEAK = 0.005;
+export const MIN_SECS = 0.3;
 
 /**
- * Try-it runs inside the onboarding window: the configured shortcut, held (or tapped twice for
- * Ask Anything), records from the microphone, then `stt_transcribe` and `refine_text` run.
- * The microphone is open only while recording. Esc cancels.
+ * Try-it runs inside the onboarding window. The real shortcuts drive it: while this window is
+ * focused, Rust sends the shortcut events here instead of the bar. The microphone is open only
+ * while recording; the clip goes through `pipeline_run` (your keys or the Comma account) and is
+ * never pasted. Esc cancels.
  */
 export function useVoiceRun({
   mode,
   accel,
-  toggle = false,
   enabled = true,
   context,
 }: {
   mode: RunMode;
+  /** Only for the in-browser dev stand-in; the app uses the configured shortcuts. */
   accel: string;
-  toggle?: boolean;
   enabled?: boolean;
   /** Read when recording starts: the selection for Ask Anything, the target for Translate. */
   context?: () => RunContext;
@@ -46,9 +48,12 @@ export function useVoiceRun({
   const opening = useRef<Promise<void> | null>(null);
   const stopRequested = useRef(false);
   const ctx = useRef<RunContext>({});
+  const startedAt = useRef(0);
   const generation = useRef(0);
   const contextFn = useRef(context);
   contextFn.current = context;
+  const microphoneId = useSettings().data?.audio.microphone_id || undefined;
+  useCaptureShortcuts(enabled);
 
   const close = useCallback(() => {
     recorder.current?.close();
@@ -60,26 +65,33 @@ export function useVoiceRun({
     const rec = recorder.current;
     if (!rec) return;
     const run = generation.current;
-    const clip = rec.stop();
+    const recordMs = Date.now() - startedAt.current;
+    const { samples, peak } = rec.stopSamples();
     close();
-    if (clip.durationSecs < 0.4 || clip.peak < SILENCE_PEAK) {
-      setPhase({ kind: "empty", message: clip.durationSecs < 0.4 ? "Hold the keys while you speak" : "Didn't catch that. Try speaking a little louder" });
+    const secs = samples.length / 16_000;
+    if (secs < MIN_SECS || peak < SILENCE_PEAK) {
+      setPhase({ kind: "empty", message: secs < MIN_SECS ? "Hold the keys while you speak" : "Didn't catch that. Try speaking a little louder" });
       return;
     }
-    setPhase({ kind: "transcribing" });
+    setPhase({ kind: "processing" });
     try {
-      const raw = await invoke("stt_transcribe", { wav_base64: clip.wavBase64 });
+      const clip = await encodeClip(samples);
+      const result = await invoke("pipeline_run", {
+        mode,
+        audio_base64: clip.base64,
+        audio_secs: clip.durationSecs,
+        source: "onboarding",
+        record_ms: Math.max(0, recordMs),
+        ...(ctx.current.selected_text ? { selected_text: ctx.current.selected_text } : {}),
+        ...(ctx.current.target_language ? { target_language: ctx.current.target_language } : {}),
+      });
       if (run !== generation.current) return;
-      if (!raw.text.trim()) {
-        setPhase({ kind: "empty", message: "Didn't catch that" });
-        return;
-      }
-      setPhase({ kind: "refining", raw });
-      const refined = await invoke("refine_text", { mode, text: raw.text, ...ctx.current });
-      if (run !== generation.current) return;
-      setPhase({ kind: "done", raw, refined });
+      setPhase({ kind: "done", result });
     } catch (err) {
-      if (run === generation.current) setPhase({ kind: "error", message: errorMessage(err) });
+      if (run !== generation.current) return;
+      if (err instanceof IpcError && err.code === "no_speech") setPhase({ kind: "empty", message: "Didn't catch that" });
+      else if (err instanceof IpcError && err.code === "cancelled") setPhase({ kind: "idle" });
+      else setPhase({ kind: "error", message: errorMessage(err) });
     }
   }, [close, mode]);
 
@@ -88,8 +100,9 @@ export function useVoiceRun({
     generation.current += 1;
     stopRequested.current = false;
     ctx.current = contextFn.current?.() ?? {};
-    setPhase({ kind: "recording", startedAt: Date.now() });
-    opening.current = Recorder.open()
+    startedAt.current = Date.now();
+    setPhase({ kind: "recording", startedAt: Date.now(), handsFree: false });
+    opening.current = Recorder.open(microphoneId)
       .then((rec) => {
         recorder.current = rec;
         rec.onLevel = setLevel;
@@ -108,7 +121,7 @@ export function useVoiceRun({
       .finally(() => {
         opening.current = null;
       });
-  }, [finish]);
+  }, [finish, microphoneId]);
 
   const stop = useCallback(() => {
     if (opening.current) {
@@ -123,20 +136,36 @@ export function useVoiceRun({
     stopRequested.current = false;
     close();
     setPhase({ kind: "idle" });
+    void invoke("pipeline_cancel").catch(() => {});
   }, [close]);
 
   const recording = phase.kind === "recording";
-  const held = useShortcutHold(accel, {
-    enabled,
+  const busy = phase.kind === "processing";
+
+  // The real shortcuts, from Rust. Any mode's shortcut starts a run of this step's mode.
+  useShortcutEvents(
+    {
+      onDown: () => !busy && start(),
+      onUp: () => stop(),
+      onCancel: () => cancel(),
+      onSwitch: (_mode, handsFree) => setPhase((p) => (p.kind === "recording" ? { ...p, handsFree } : p)),
+    },
+    enabled && inTauri,
+  );
+
+  // In a plain browser (dev), the window's own key events stand in for the shortcut.
+  const toggle = mode === "ask";
+  const held = useShortcutHold(accel.startsWith("Fn") ? "" : accel, {
+    enabled: enabled && !inTauri,
     onDown: () => (toggle && recording ? stop() : start()),
     onUp: () => (toggle ? undefined : stop()),
   });
 
-  // Esc cancels a recording; a long one stops by itself.
+  // Esc cancels in the browser; a long recording stops by itself.
   useEffect(() => {
     if (!recording) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && cancel();
-    window.addEventListener("keydown", onKey);
+    if (!inTauri) window.addEventListener("keydown", onKey);
     const limit = setTimeout(stop, MAX_SECS * 1000);
     return () => {
       window.removeEventListener("keydown", onKey);
@@ -146,9 +175,13 @@ export function useVoiceRun({
 
   useEffect(() => () => cancel(), [cancel]);
 
-  const busy = match(phase.kind)
-    .with("transcribing", "refining", () => true)
-    .otherwise(() => false);
-
-  return { phase, level, held, busy, reset: cancel };
+  return {
+    phase,
+    level,
+    held,
+    busy: match(phase.kind)
+      .with("processing", () => true)
+      .otherwise(() => false),
+    reset: cancel,
+  };
 }

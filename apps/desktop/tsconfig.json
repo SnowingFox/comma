@@ -21,5 +21,7 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src", "../../packages/multica-ui/types/i18next.ts", "../../packages/multica-ui/css.d.ts"]
+  "include": ["src", "../../packages/multica-ui/types/i18next.ts", "../../packages/multica-ui/css.d.ts"],
+  /* Unit tests run under `bun test`, which brings its own types. */
+  "exclude": ["src/**/*.test.ts"]
 }
