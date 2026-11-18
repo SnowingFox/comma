@@ -1,0 +1,12 @@
+# Build context is the repository root; send only what the server image needs.
+**
+!package.json
+!bun.lock
+!packages/shared/package.json
+!packages/shared/src/**
+!apps/server/package.json
+!apps/server/bunfig.toml
+!apps/server/tsconfig.json
+!apps/server/drizzle.config.ts
+!apps/server/drizzle/**
+!apps/server/src/**

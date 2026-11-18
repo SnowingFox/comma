@@ -1,0 +1,56 @@
+# Postgres and the Comma server for local and self-hosted runs.
+#   docker compose up -d            # db, migrations, server on http://127.0.0.1:8787
+#   docker compose up -d db         # only Postgres, on 127.0.0.1:55432, for `bun run start:dev` and `bun test`
+# Settings come from apps/server/.env.example (placeholders). For a real deployment, copy it,
+# set NODE_ENV=production, a real JWT__SECRET and SMTP, and point env_file at the copy.
+name: comma
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: comma
+      POSTGRES_PASSWORD: comma
+      POSTGRES_DB: comma
+    ports:
+      - "127.0.0.1:${COMMA_DB_PORT:-55432}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U comma -d comma"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # One-shot: applies drizzle/ migrations, then exits; the server starts only after it succeeds.
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    image: comma-server:local
+    command: ["bun", "src/migrate.ts"]
+    env_file: apps/server/.env.example
+    environment:
+      DATABASE__URL: postgres://comma:comma@db:5432/comma
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  server:
+    image: comma-server:local
+    env_file: apps/server/.env.example
+    environment:
+      DATABASE__URL: postgres://comma:comma@db:5432/comma
+      SERVER__PORT: "8787"
+    ports:
+      - "127.0.0.1:${COMMA_SERVER_PORT:-8787}:8787"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  db-data:
