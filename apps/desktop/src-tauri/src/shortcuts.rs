@@ -165,6 +165,8 @@ pub struct Shortcuts {
     reg: Arc<Mutex<Registration>>,
     capture: Arc<Mutex<Option<WindowLabel>>>,
     probe: Arc<AtomicBool>,
+    /// The shortcut recorder is open: nothing is registered or matched, so the keys reach it.
+    suspended: Arc<AtomicBool>,
 }
 
 /// Called with each action after its event is emitted, on the dispatcher thread.
@@ -194,7 +196,13 @@ impl Shortcuts {
             },
             configured: configured.clone(),
         }));
-        let me = Self { tx, reg, capture: Arc::new(Mutex::new(None)), probe: Arc::new(AtomicBool::new(probe)) };
+        let me = Self {
+            tx,
+            reg,
+            capture: Arc::new(Mutex::new(None)),
+            probe: Arc::new(AtomicBool::new(probe)),
+            suspended: Arc::new(AtomicBool::new(false)),
+        };
         me.reconfigure(app, &configured);
 
         let dispatcher = me.clone();
@@ -259,6 +267,18 @@ impl Shortcuts {
         }
     }
 
+    /// While the shortcut recorder is open, every shortcut is off so its keys reach the recorder
+    /// (a registered combination never arrives in a window). Turned back on when it closes.
+    pub fn set_suspended(&self, app: &AppHandle, on: bool) {
+        if self.suspended.swap(on, Ordering::Relaxed) == on {
+            return;
+        }
+        let configured = self.reg.lock().map(|r| r.configured.clone()).ok();
+        if let Some(configured) = configured {
+            self.reconfigure(app, &configured);
+        }
+    }
+
     /// From the global-shortcut plugin's handler.
     pub fn on_plugin_event(&self, shortcut: &Shortcut, event: ShortcutEvent) {
         let Ok(reg) = self.reg.lock() else { return };
@@ -280,13 +300,14 @@ impl Shortcuts {
     pub fn reconfigure(&self, app: &AppHandle, configured: &ShortcutSettings) {
         let granted = comma_input::input_monitoring_granted() || self.probe.load(Ordering::Relaxed);
         let any_fn = MODES.iter().any(|&m| matches!(comma_input::parse_fn(configured.get(m)), Ok(Some(_))));
+        let suspended = self.suspended.load(Ordering::Relaxed);
         let Ok(mut reg) = self.reg.lock() else { return };
         reg.configured = configured.clone();
 
         // The tap runs only when an Fn shortcut is configured and the permission is there.
         let mut fn_running = false;
         if any_fn && granted {
-            let (bindings, _) = plan(configured, true);
+            let (bindings, _) = if suspended { (FnBindings::default(), Vec::new()) } else { plan(configured, true) };
             if let Some(tap) = &reg.tap {
                 tap.set_bindings(bindings);
                 fn_running = true;
@@ -317,7 +338,7 @@ impl Shortcuts {
             let _ = gs.unregister(shortcut);
         }
         let mut errors = Vec::new();
-        for (mode, accel) in &plugin {
+        for (mode, accel) in plugin.iter().filter(|_| !suspended) {
             match Shortcut::from_str(accel) {
                 Ok(shortcut) => match gs.register(shortcut) {
                     Ok(()) => reg.plugin.push((shortcut, *mode)),

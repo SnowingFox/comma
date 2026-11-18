@@ -2,18 +2,16 @@ import { useEffect, useId, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { match } from "ts-pattern";
-import { LlmBaseUrl, ThemePreference, type ShortcutSettings } from "@comma/shared/ipc";
+import { LlmBaseUrl, ThemePreference } from "@comma/shared/ipc";
 import { Button } from "@multica/ui/components/ui/button";
 import { Input } from "@multica/ui/components/ui/input";
 import { Switch } from "@multica/ui/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@multica/ui/components/ui/tabs";
 import { Monitor, Moon, Sun } from "@multica/ui/icons";
-import { Keycaps } from "../../../components/keycaps";
 import { LanguageChips } from "../../../components/language-chips";
 import { isMagpieUrl, LlmProviderFields, useLlmDraft } from "../../../components/llm-fields";
 import { ModeChoice } from "../../../components/mode-choice";
-import { PermissionList } from "../../../components/permission-list";
-import { ShortcutRecorder } from "../../../components/shortcut-recorder";
+import { MicrophonePicker } from "../../../components/microphone-picker";
 import { StatusDot } from "../../../components/status-dot";
 import { SttFields } from "../../../components/stt-fields";
 import { errorMessage, invoke } from "../../../lib/ipc";
@@ -157,6 +155,9 @@ export function SpeechSection() {
           </Row>
         </Group>
       ) : null}
+      <Group title="Microphone" description="Comma opens it only while you hold a shortcut, or until you stop a hands-free run.">
+        <MicrophonePicker />
+      </Group>
       <p className="px-0.5 text-label text-muted-foreground">
         Terms in your Dictionary are sent along as keyterms, so names and jargon come out spelled right.
       </p>
@@ -196,77 +197,4 @@ export function LlmSection() {
   );
 }
 
-export function ContextSection() {
-  return (
-    <>
-      <SectionHeader
-        title="Context"
-        description="What Comma may read, only during a run you start: the focused app's name, and for Ask Anything the selected text."
-      />
-      <Later items={["Off switch for app context", "Selected text for Ask Anything"]} />
-    </>
-  );
-}
-
-const SHORTCUT_ROWS: { mode: keyof ShortcutSettings; name: string; how: string }[] = [
-  { mode: "dictate", name: "Dictate", how: "Hold, speak, release" },
-  { mode: "ask", name: "Ask Anything", how: "Tap to start, tap to stop" },
-  { mode: "translate", name: "Translate", how: "Hold, speak, release" },
-];
-
-export function ShortcutsSection() {
-  const shortcuts = useSettings().data?.shortcuts;
-  const [editing, setEditing] = useState<keyof ShortcutSettings | null>(null);
-  return (
-    <>
-      <SectionHeader
-        title="Shortcuts"
-        description="Only these key combinations are registered with macOS. Comma never watches the rest of your keyboard."
-      />
-      <Group title="Modes">
-        {SHORTCUT_ROWS.map((r) => (
-          <Row key={r.mode} label={r.name} description={r.how}>
-            <div className="flex items-center gap-3">
-              {shortcuts ? <Keycaps accel={shortcuts[r.mode]} size="sm" /> : null}
-              <Button variant="ghost" size="sm" onClick={() => setEditing(r.mode)}>
-                Change
-              </Button>
-            </div>
-          </Row>
-        ))}
-      </Group>
-      <ShortcutRecorder mode={editing ?? "dictate"} open={editing !== null} onOpenChange={(open) => !open && setEditing(null)} />
-      <Later items={["Hands-free lock with a double press"]} />
-    </>
-  );
-}
-
-export function SoundsSection() {
-  return (
-    <>
-      <SectionHeader title="Sounds and bar" description="The ticks you hear and the bar you see while dictating." />
-      <Later items={["Start and finish sounds", "Show the bar when idle"]} />
-    </>
-  );
-}
-
-export function PrivacySection() {
-  return (
-    <>
-      <SectionHeader
-        title="Privacy"
-        description="Audio is recorded only while you hold the shortcut and is not kept unless you turn on Keep audio."
-      />
-      <Later items={["History retention", "Keep audio"]} />
-    </>
-  );
-}
-
-export function PermissionsSection() {
-  return (
-    <>
-      <SectionHeader title="Permissions" description="Comma needs two macOS permissions. Status updates live." />
-      <PermissionList />
-    </>
-  );
-}
+export { ContextSection, PermissionsSection, PrivacySection, ShortcutsSection, SoundsSection } from "./more-sections";

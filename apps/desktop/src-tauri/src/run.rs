@@ -96,6 +96,15 @@ pub fn hint_take(state: &AppState, kind: HintKind) -> AppResult<bool> {
     Ok(true)
 }
 
+pub fn hints_reset(state: &AppState) -> AppResult<()> {
+    let mut settings = state.settings_guard()?;
+    let mut next = settings.clone();
+    next.hint_counts.clear();
+    crate::settings::save(&state.settings_path, &next)?;
+    *settings = next;
+    Ok(())
+}
+
 /// What a run may use from the app the user was in when the shortcut went down.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Captured {

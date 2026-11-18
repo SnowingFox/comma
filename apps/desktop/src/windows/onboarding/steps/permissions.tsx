@@ -7,7 +7,7 @@ import { useSettings } from "../../../lib/queries";
 import { useStepControls } from "../flow";
 import { Split } from "./layout";
 
-const DATA: Record<AppMode, { title: string; rows: { what: string; where: string }[] }> = {
+export const DATA_FLOWS: Record<AppMode, { title: string; rows: { what: string; where: string }[] }> = {
   local: {
     title: "With your own keys",
     rows: [
@@ -29,7 +29,7 @@ const DATA: Record<AppMode, { title: string; rows: { what: string; where: string
 function DataPanel() {
   const mode = useSettings().data?.mode ?? "local";
   const [tab, setTab] = useState<AppMode>(mode);
-  const data = DATA[tab];
+  const data = DATA_FLOWS[tab];
   return (
     <div className="flex h-full w-full flex-col gap-3.5 self-stretch">
       <div className="flex flex-col gap-2.5">

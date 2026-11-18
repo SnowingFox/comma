@@ -574,6 +574,12 @@ pub fn shortcuts_capture(app: AppHandle, owner: Option<WindowLabel>) -> AppResul
     Ok(())
 }
 
+#[tauri::command]
+pub fn shortcuts_suspend(app: AppHandle, suspended: bool) -> AppResult<()> {
+    shortcuts(&app)?.set_suspended(&app, suspended);
+    Ok(())
+}
+
 #[tauri::command(rename_all = "snake_case")]
 #[allow(clippy::too_many_arguments)]
 pub async fn pipeline_run(
@@ -654,6 +660,14 @@ pub fn on_bar_menu(app: &AppHandle, id: &str) {
 #[tauri::command]
 pub fn hint_take(state: State<'_, AppState>, kind: HintKind) -> AppResult<bool> {
     run::hint_take(&state, kind)
+}
+
+/// Forgets how often each hint was shown, so the teaching hints show again.
+#[tauri::command]
+pub fn hints_reset(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    run::hints_reset(&state)?;
+    let _ = app.emit("settings://changed", json!({}));
+    Ok(())
 }
 
 // ---- History and usage --------------------------------------------------------------------------

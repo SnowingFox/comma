@@ -48,6 +48,7 @@ const KEY_LABELS: Record<string, string> = {
   Minus: "-",
   Equal: "=",
   Backquote: "`",
+  Escape: "esc",
 };
 
 /** Keys that can follow `Fn+`, as keycaps. Side-specific modifiers say which side. */

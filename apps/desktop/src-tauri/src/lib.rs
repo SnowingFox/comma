@@ -96,6 +96,8 @@ pub fn run() {
             commands::account_credits,
             commands::shortcuts_status,
             commands::shortcuts_capture,
+            commands::shortcuts_suspend,
+            commands::hints_reset,
             commands::pipeline_run,
             commands::pipeline_cancel,
             commands::output_insert,

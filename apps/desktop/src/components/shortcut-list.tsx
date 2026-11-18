@@ -4,7 +4,7 @@ import { Keycaps } from "./keycaps";
 
 const MODES: { mode: keyof ShortcutSettings; name: string; how: string }[] = [
   { mode: "dictate", name: "Dictate", how: "Hold, speak, release" },
-  { mode: "ask", name: "Ask Anything", how: "Tap to start, tap to stop" },
+  { mode: "ask", name: "Ask Anything", how: "Press once to start, again to stop" },
   { mode: "translate", name: "Translate", how: "Hold, speak, release" },
 ];
 

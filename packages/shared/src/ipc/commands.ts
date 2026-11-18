@@ -291,6 +291,8 @@ export const commands = {
   shortcuts_status: { args: NoArgs, result: ShortcutsStatus },
   /** While `owner` is focused, shortcut events go only to it (onboarding try steps); null gives them back to the bar. */
   shortcuts_capture: { args: z.object({ owner: z.enum(["onboarding"]).nullable() }).strict(), result: Unit },
+  /** While the shortcut recorder is open: nothing is registered or matched, so its keys reach the window. */
+  shortcuts_suspend: { args: z.object({ suspended: z.boolean() }).strict(), result: Unit },
 
   /**
    * A full run: speech to text and the rewrite (your keys, or the Comma server in account mode), then the output
@@ -332,6 +334,8 @@ export const commands = {
   bar_menu: { args: NoArgs, result: Unit },
   /** Whether hint `kind` may show now (hints on and under its limit); counts it when it may. */
   hint_take: { args: z.object({ kind: HintKind }).strict(), result: z.boolean() },
+  /** Forgets how often each hint was shown, so the teaching hints show again. */
+  hints_reset: { args: NoArgs, result: Unit },
 
   runs_list: { args: RunsQuery, result: z.array(RunRecord) },
   run_get: { args: z.object({ id: z.string().max(64) }).strict(), result: RunRecord },
