@@ -13,6 +13,7 @@ const STATE_LABELS: Record<BarState, string> = {
   recording: "Recording",
   processing: "Processing",
   done: "Done",
+  empty: "No speech",
   error: "Error",
 };
 

@@ -14,6 +14,7 @@ const SHAPES: Record<BarState, { width: number; height: number; radius: number }
   recording: { width: 184, height: 40, radius: 20 },
   processing: { width: 184, height: 40, radius: 20 },
   done: { width: 40, height: 40, radius: 20 },
+  empty: { width: 184, height: 40, radius: 20 },
   error: { width: 336, height: 44, radius: 14 },
 };
 

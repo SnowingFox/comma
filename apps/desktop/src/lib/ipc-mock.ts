@@ -21,6 +21,10 @@ import {
   type SecretName,
 } from "@comma/shared/ipc";
 
+import { HISTORY_HANDLERS } from "./mock/history";
+import { RUNTIME_HANDLERS } from "./mock/runtime";
+import type { MockHandler } from "./mock/types";
+
 const KEY = "comma-dev-mock";
 
 type Knobs = { magpie: "up" | "down" | "slow"; server: "up" | "down"; stt: "ok" | "missing_permission" | "invalid_key" };
@@ -48,7 +52,7 @@ function defaults(): MockState {
   return {
     settings: structuredClone(DEFAULT_SETTINGS),
     secrets: { elevenlabs: false, llm: false },
-    permissions: { microphone: "not_determined", accessibility: "denied" },
+    permissions: { microphone: "not_determined", accessibility: "denied", input_monitoring: "denied" },
     knobs: { magpie: "up", server: "up", stt: "ok" },
     session: false,
   };
@@ -88,7 +92,7 @@ function applyUrlKnobs() {
   if (keys === "1") {
     state.secrets.elevenlabs = true;
     if (!state.settings.llm.model) state.settings.llm.model = MODELS[0]!;
-    state.permissions = { microphone: "granted", accessibility: "granted" };
+    state.permissions = { microphone: "granted", accessibility: "granted", input_monitoring: "granted" };
   } else if (keys === "0") {
     state.secrets = { elevenlabs: false, llm: false };
     state.settings.llm.model = "";
@@ -146,6 +150,9 @@ export async function mockInvoke(command: CommandName, args: Record<string, unkn
         languages: { ...state.settings.languages, ...patch.languages },
         shortcuts: { ...state.settings.shortcuts, ...patch.shortcuts },
         account: { ...state.settings.account, ...patch.account },
+        feedback: { ...state.settings.feedback, ...patch.feedback },
+        privacy: { ...state.settings.privacy, ...patch.privacy },
+        audio: { ...state.settings.audio, ...patch.audio },
       });
       save({ ...state, settings: next });
       return next;
@@ -260,5 +267,9 @@ export async function mockInvoke(command: CommandName, args: Record<string, unkn
       save({ ...state, session: false, settings: { ...state.settings, mode: "local" } });
       return null;
     })
-    .exhaustive();
+    .otherwise(async () => {
+      const handler = (HISTORY_HANDLERS[command] ?? RUNTIME_HANDLERS[command]) as MockHandler | undefined;
+      if (!handler) fail("unsupported", `${command} is not mocked`);
+      return handler(args, { mode: state.settings.mode, model: state.settings.llm.model });
+    });
 }

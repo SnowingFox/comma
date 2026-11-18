@@ -44,8 +44,31 @@ export const LanguageSettings = z.object({
 });
 export type LanguageSettings = z.infer<typeof LanguageSettings>;
 
-/** An accelerator such as `Alt+Shift+Space` (modifiers `Control`, `Alt`, `Shift`, `Super`, then one key). */
+/**
+ * A shortcut. Two kinds:
+ * - Fn-based, matched by Comma's modifier listener (needs Input Monitoring): `Fn` alone, or `Fn+<key>` with one of
+ *   `FN_KEYS` (`Fn+Space`, `Fn+ShiftLeft`).
+ * - An ordinary accelerator for the global-shortcut plugin: modifiers `Control`, `Alt`, `Shift`, `Super`, then one key
+ *   (`Alt+Shift+Space`).
+ */
 export const Accelerator = z.string().min(1).max(64).regex(/^\S+$/, "no spaces");
+
+/** Keys that can follow `Fn+`. Side-specific modifiers use the `KeyboardEvent.code` names. */
+export const FN_KEYS = [
+  "Space",
+  "ShiftLeft",
+  "ShiftRight",
+  "ControlLeft",
+  "ControlRight",
+  "AltLeft",
+  "AltRight",
+  "MetaLeft",
+  "MetaRight",
+] as const;
+
+export function isFnAccelerator(accel: string): boolean {
+  return accel === "Fn" || accel.startsWith("Fn+");
+}
 
 export const ShortcutSettings = z.object({
   dictate: Accelerator,
@@ -53,6 +76,38 @@ export const ShortcutSettings = z.object({
   translate: Accelerator,
 });
 export type ShortcutSettings = z.infer<typeof ShortcutSettings>;
+
+/** What a run may read from other apps (spec section 1): nothing, the focused app's name, or that plus the selection for Ask Anything. */
+export const ContextLevel = z.enum(["off", "app", "app_and_selection"]);
+export type ContextLevel = z.infer<typeof ContextLevel>;
+
+/** Sounds, the idle bar and the bar hints (spec 2.1, 2.3.1). */
+export const FeedbackSettings = z.object({
+  /** Soft synthesised ticks at start and finish. */
+  sounds: z.boolean(),
+  /** A 6 px dot at the bottom centre while Comma is idle. */
+  show_idle_bar: z.boolean(),
+  /** The short teaching hints next to the bar. */
+  hints: z.boolean(),
+});
+export type FeedbackSettings = z.infer<typeof FeedbackSettings>;
+
+/** History retention choices in days; 0 keeps everything. */
+export const HISTORY_DAYS = [0, 7, 30, 90] as const;
+
+export const PrivacySettings = z.object({
+  /** Keep each run's WAV next to its history entry. Off by default. */
+  keep_audio: z.boolean(),
+  /** Runs older than this many days are deleted; 0 keeps them. */
+  history_days: z.number().int().min(0).max(3650),
+});
+export type PrivacySettings = z.infer<typeof PrivacySettings>;
+
+export const AudioSettings = z.object({
+  /** `MediaDeviceInfo.deviceId` of the microphone to use; empty for the system default. */
+  microphone_id: z.string().max(256),
+});
+export type AudioSettings = z.infer<typeof AudioSettings>;
 
 /** The Comma server and who is signed in. Tokens live in the Keychain, never here. */
 export const AccountSettings = z.object({
@@ -77,6 +132,12 @@ export const Settings = z.object({
   languages: LanguageSettings,
   shortcuts: ShortcutSettings,
   account: AccountSettings,
+  context_level: ContextLevel,
+  feedback: FeedbackSettings,
+  privacy: PrivacySettings,
+  audio: AudioSettings,
+  /** How often each bar hint has been shown (spec 2.3.1). Written by Rust only. */
+  hint_counts: z.record(z.string(), z.number().int().nonnegative()),
 });
 export type Settings = z.infer<typeof Settings>;
 
@@ -93,6 +154,10 @@ export const SettingsPatch = z
     shortcuts: ShortcutSettings.partial().strict().optional(),
     /** Only `server_url` is meant to be set from the UI; the rest follows sign-in. */
     account: AccountSettings.pick({ server_url: true }).partial().strict().optional(),
+    context_level: ContextLevel.optional(),
+    feedback: FeedbackSettings.partial().strict().optional(),
+    privacy: PrivacySettings.partial().strict().optional(),
+    audio: AudioSettings.partial().strict().optional(),
   })
   .strict();
 export type SettingsPatch = z.infer<typeof SettingsPatch>;
@@ -103,7 +168,15 @@ export const MAGPIE_BASE_URL = "http://127.0.0.1:3425/v1";
 /** A Comma server run locally with `docker compose up`. */
 export const DEFAULT_SERVER_URL = "http://127.0.0.1:8787";
 
+/** Spec 2.1 to 2.3: Fn held, Fn+Space pressed, Fn+Left Shift held. */
 export const DEFAULT_SHORTCUTS: ShortcutSettings = {
+  dictate: "Fn",
+  ask: "Fn+Space",
+  translate: "Fn+ShiftLeft",
+};
+
+/** Used for an Fn-based shortcut while Input Monitoring is not allowed. */
+export const FALLBACK_SHORTCUTS: ShortcutSettings = {
   dictate: "Alt+Space",
   ask: "Alt+Shift+Space",
   translate: "Alt+Control+Space",
@@ -120,4 +193,9 @@ export const DEFAULT_SETTINGS: Settings = {
   languages: { spoken: [], auto_detect: true, translate_targets: [] },
   shortcuts: DEFAULT_SHORTCUTS,
   account: { server_url: DEFAULT_SERVER_URL, email: "", name: "", access_expires_at: 0 },
+  context_level: "app_and_selection",
+  feedback: { sounds: true, show_idle_bar: false, hints: true },
+  privacy: { keep_audio: false, history_days: 0 },
+  audio: { microphone_id: "" },
+  hint_counts: {},
 };
