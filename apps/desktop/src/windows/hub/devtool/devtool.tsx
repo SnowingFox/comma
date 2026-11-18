@@ -4,7 +4,8 @@ import { X } from "@multica/ui/icons";
 import { startDevtoolRecording } from "../../../lib/devtool-store";
 import { useShortcutsStatus } from "../../../lib/shortcut-events";
 import { DEVTOOL_STYLE } from "./devtool-style";
-import { BarTab, listenerTone, LogTab, OnboardingTab, PermissionsTab, RunsTab, ShortcutsTab } from "./tabs";
+import { invoke } from "../../../lib/ipc";
+import { BarTab, listenerTone, LogTab, OnboardingTab, PermissionsTab, RunsTab, ShortcutsTab, SWALLOW_KEY } from "./tabs";
 
 export const DEVTOOL_TABS = ["shortcuts", "permissions", "runs", "log", "onboarding", "bar"] as const;
 export type DevtoolTab = (typeof DEVTOOL_TABS)[number];
@@ -42,6 +43,10 @@ export function DevTool() {
   const tone = listenerTone(status);
 
   useEffect(() => startDevtoolRecording(), []);
+  // The experimental Fn swallowing is kept here, not in settings, and applied when the hub loads.
+  useEffect(() => {
+    if (localStorage.getItem(SWALLOW_KEY) === "1") void invoke("shortcuts_set_swallow", { on: true }).catch(() => {});
+  }, []);
   useEffect(() => localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)), [prefs]);
   useEffect(() => {
     if (!prefs.open) return;

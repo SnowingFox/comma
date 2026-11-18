@@ -28,8 +28,10 @@ export function listenerTone(s: ShortcutsStatus | undefined): Tone {
   return s.listener === "fn" ? "on" : "warn";
 }
 
+export const SWALLOW_KEY = "comma-swallow-fn";
+
 function tapText(s: ShortcutsStatus) {
-  if (s.tap === "running") return s.tap_delivered ? "running, delivering events" : "running, nothing delivered yet";
+  if (s.tap === "running") return s.tap_keys ? "running, key presses arrive" : s.tap_delivered ? "running, modifiers only so far" : "running, nothing delivered yet";
   if (s.tap === "failed") return `failed: ${s.tap_error ?? "unknown"}`;
   return "off";
 }
@@ -93,13 +95,21 @@ export function ShortcutsTab() {
               <Status tone={listenerTone(status)}>{status.listener === "fn" ? "Fn tap" : "fallback shortcuts"}</Status>
             </Row>
             <Row label="Fn tap">
-              <Status tone={status.tap === "running" ? (status.tap_delivered ? "on" : "warn") : status.tap === "failed" ? "bad" : undefined}>{tapText(status)}</Status>
+              <Status tone={status.tap === "running" ? (status.tap_keys ? "on" : "warn") : status.tap === "failed" ? "bad" : undefined}>{tapText(status)}</Status>
             </Row>
             <Row label="Input Monitoring">
-              <Status tone={status.input_monitoring ? "on" : "bad"}>{status.input_monitoring ? "allowed (preflight)" : "not allowed (preflight)"}</Status>
+              <Status tone={status.input_monitoring || status.tap_keys ? "on" : "bad"}>
+                {status.input_monitoring ? "allowed (preflight)" : status.tap_keys ? "in effect (key presses arrive; preflight stale)" : "not allowed (preflight)"}
+              </Status>
             </Row>
+            <Row label="Asked this run">{status.requested ? "yes: another request would not prompt" : "no"}</Row>
             <Row label="Globe key">{status.globe_key}</Row>
-            {status.restart_required ? <Note tone="bad">Allowed in System Settings, but the tap does not start. Restart Comma.</Note> : null}
+            <Row label="Swallow Fn">
+              <Status tone={status.swallow === "on" ? "on" : status.swallow === "unavailable" ? "bad" : undefined}>
+                {status.swallow === "unavailable" ? "unavailable (needs Accessibility)" : status.swallow}
+              </Status>
+            </Row>
+            {status.restart_required ? <Note tone="bad">Allowed in System Settings, but the tap does not start. Relaunch Comma.</Note> : null}
             {status.tap === "running" && !status.input_monitoring ? (
               <Note tone="warn">macOS created the tap without Input Monitoring; it may receive nothing. The fallbacks are registered too.</Note>
             ) : null}
@@ -115,7 +125,20 @@ export function ShortcutsTab() {
         <div className="cdt-buttons">
           <DevButton onClick={() => run("shortcuts_restart", "Listener restarted")}>Restart listener</DevButton>
           <DevButton onClick={() => run("shortcuts_probe", "Tap probed")}>Re-probe tap</DevButton>
+          <DevButton
+            active={status?.swallow === "on"}
+            onClick={() => {
+              const on = status?.swallow !== "on";
+              localStorage.setItem(SWALLOW_KEY, on ? "1" : "0");
+              void invoke("shortcuts_set_swallow", { on })
+                .then((s) => qc.setQueryData(shortcutsStatusKey, s))
+                .catch(fail);
+            }}
+          >
+            Swallow Fn (experimental)
+          </DevButton>
         </div>
+        <Note>Swallow Fn uses an active tap that drops Fn's own events so macOS may skip the Globe key action. It needs Accessibility and is off by default.</Note>
       </Section>
 
       <Section title="Registered">
@@ -213,12 +236,12 @@ export function PermissionsTab() {
       </Section>
       {status && perms?.input_monitoring !== "granted" ? (
         <Note tone="warn">
-          Input Monitoring changes reach a running app only sometimes. If it is on in System Settings and still shows denied here, restart Comma.
+          Input Monitoring changes reach a running app only sometimes. If it is on in System Settings and still shows denied here, relaunch Comma.
         </Note>
       ) : null}
       <div className="cdt-buttons">
         <DevButton onClick={() => void invoke("app_restart").catch(fail)} danger>
-          Restart Comma
+          Relaunch Comma
         </DevButton>
       </div>
     </>
@@ -302,7 +325,7 @@ export function RunsTab() {
                 <Fragment key={r.id}>
                   <tr>
                     <td title={r.id}>
-                      {clock(r.ts).slice(0, 8)} {r.mode}
+                      {when(r.ts)} {r.mode}
                     </td>
                     <td>{r.audio_secs.toFixed(1)}</td>
                     <td>{msText(r.stt_ms)}</td>
@@ -327,6 +350,13 @@ export function RunsTab() {
       </Section>
     </>
   );
+}
+
+/** Time today, else month/day and time. */
+function when(ts: number): string {
+  const d = new Date(ts);
+  const time = clock(ts).slice(0, 5);
+  return d.toDateString() === new Date().toDateString() ? time : `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")} ${time}`;
 }
 
 // ---- Log ------------------------------------------------------------------------------------------

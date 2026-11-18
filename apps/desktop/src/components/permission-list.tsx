@@ -79,9 +79,10 @@ export function PermissionList({ className, recheck = false }: { className?: str
         const state = data?.[kind];
         const granted = state === "granted";
         const onClick = () => {
+          // Asked once in this run already: open System Settings instead of asking again.
           const run = kind === "microphone" && state === "not_determined"
             ? requestMicrophone()
-            : kind === "input_monitoring"
+            : kind === "input_monitoring" && !status?.requested
               ? allowInputMonitoring()
               : invoke("open_settings_pane", { kind });
           run.catch((err: Error) => toast.error(err.message));
@@ -117,20 +118,20 @@ export function PermissionList({ className, recheck = false }: { className?: str
               <p className="text-label text-muted-foreground">{description}</p>
               {recheck && kind === "input_monitoring" && !granted ? (
                 <p className="text-label text-muted-foreground">
-                  Turned it on already? macOS lets Comma use it after a restart.{" "}
+                  Turned it on already? macOS lets Comma use it after a relaunch.{" "}
                   <button type="button" className="font-medium text-foreground underline underline-offset-2" onClick={() => void invoke("app_restart").catch((e: unknown) => toast.error(errorMessage(e)))}>
-                    Restart Comma
+                    Relaunch Comma
                   </button>
                 </p>
               ) : null}
               {recheck && kind === "input_monitoring" && granted && im === "missing" ? (
-                <p className="text-label text-warning">Allowed, but the Fn listener has not picked it up. Check again, or restart Comma.</p>
+                <p className="text-label text-warning">Allowed, but the Fn listener has not picked it up. Check again, or relaunch Comma.</p>
               ) : null}
               {recheck && kind === "input_monitoring" && im === "restart" ? (
                 <p className="text-label text-warning">
                   Allowed, but this copy of Comma can't use it yet.{" "}
                   <button type="button" className="font-medium underline underline-offset-2" onClick={() => void invoke("app_restart").catch((e: unknown) => toast.error(errorMessage(e)))}>
-                    Restart Comma
+                    Relaunch Comma
                   </button>
                 </p>
               ) : null}
@@ -153,7 +154,7 @@ export function PermissionList({ className, recheck = false }: { className?: str
             ) : null}
             {granted ? null : (
               <Button variant="outline" size="sm" onClick={onClick} disabled={state === "restricted"}>
-                {(kind === "microphone" && state === "not_determined") || kind === "input_monitoring" ? "Allow" : "Open Settings"}
+                {(kind === "microphone" && state === "not_determined") || (kind === "input_monitoring" && !status?.requested) ? "Allow" : "Open Settings"}
               </Button>
             )}
           </li>

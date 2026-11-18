@@ -8,7 +8,8 @@ import { parseAccelerator, useShortcutHold } from "./shortcut";
 export type ShortcutHandlers = {
   onDown?: (mode: RunMode) => void;
   onUp?: (mode: RunMode) => void;
-  onCancel?: (mode: RunMode) => void;
+  /** `quiet`: a tap too short to hold speech, not a deliberate cancel. */
+  onCancel?: (mode: RunMode, quiet: boolean) => void;
   onSwitch?: (mode: RunMode, handsFree: boolean) => void;
 };
 
@@ -21,7 +22,7 @@ export function useShortcutEvents(handlers: ShortcutHandlers, enabled = true) {
     const offs = [
       listen("shortcut://down", (p) => latest.current.onDown?.(p.mode)),
       listen("shortcut://up", (p) => latest.current.onUp?.(p.mode)),
-      listen("shortcut://cancel", (p) => latest.current.onCancel?.(p.mode)),
+      listen("shortcut://cancel", (p) => latest.current.onCancel?.(p.mode, p.quiet === true)),
       listen("shortcut://switch", (p) => latest.current.onSwitch?.(p.mode, p.hands_free)),
     ];
     return () => offs.forEach((off) => void off.then((f) => f()));

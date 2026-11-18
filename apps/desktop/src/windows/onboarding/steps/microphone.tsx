@@ -11,7 +11,7 @@ import { listMicrophones, Recorder } from "../../../lib/audio/recorder";
 import { formatMs, formatSecs } from "../../../lib/format";
 import { errorMessage, invoke } from "../../../lib/ipc";
 import { detectedLanguageName } from "../../../lib/languages";
-import { useSecretStatus } from "../../../lib/queries";
+import { usePermissions, useSecretStatus } from "../../../lib/queries";
 import { useFlow, useStepControls } from "../flow";
 import { Split } from "./layout";
 
@@ -55,9 +55,15 @@ export function MicrophoneStep() {
   const recorder = useRef<Recorder | null>(null);
   const smoothed = useRef(0);
   useStepControls({});
+  // Opening the microphone can raise the system prompt, so it opens by itself only once it is
+  // allowed; otherwise on a click (onboarding can resume at this step right at launch).
+  const micState = usePermissions().data?.microphone;
+  const [clicked, setClicked] = useState(false);
+  const canOpen = micState === "granted" || clicked;
 
   // The microphone stays open while this step is on screen, for the meter.
   useEffect(() => {
+    if (!canOpen) return;
     let cancelled = false;
     let rec: Recorder | null = null;
     setOpenError(null);
@@ -91,7 +97,7 @@ export function MicrophoneStep() {
       recorder.current = null;
       setHistory(Array(BARS).fill(0));
     };
-  }, [deviceId]);
+  }, [deviceId, canOpen]);
 
   const stop = useCallback(async () => {
     const rec = recorder.current;
@@ -207,7 +213,16 @@ export function MicrophoneStep() {
           {openError}
         </p>
       ) : null}
-      <div className="flex items-center gap-3">
+      {!canOpen && micState !== undefined ? (
+        <div className="flex items-center gap-3">
+          <Button size="lg" onClick={() => setClicked(true)}>
+            <Mic />
+            Turn on the microphone
+          </Button>
+          <span className="text-label text-muted-foreground">macOS asks once.</span>
+        </div>
+      ) : null}
+      <div className={cn("flex items-center gap-3", !canOpen && "hidden")}>
         <Button size="lg" variant={recording ? "secondary" : "default"} onClick={() => (recording ? void stop() : record())} disabled={!micReady || take.kind === "transcribing"}>
           {recording ? <Square className="size-3.5 fill-current" /> : <Mic />}
           {recording ? "Stop" : take.kind === "done" ? "Try again" : "Say a sentence"}

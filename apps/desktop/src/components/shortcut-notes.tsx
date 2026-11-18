@@ -9,11 +9,16 @@ import { queryKeys, useSettings } from "../lib/queries";
 import { acceleratorWords } from "../lib/shortcut";
 import { useShortcutsStatus } from "../lib/shortcut-events";
 
-/** Asks macOS for Input Monitoring; opens its pane when the prompt was already answered. */
+/**
+ * On a click: asks macOS for Input Monitoring (the prompt shows at most once per process), and
+ * opens its pane in System Settings when it is not in effect.
+ */
 export async function allowInputMonitoring() {
   const granted = await invoke("input_monitoring_request");
   if (!granted) await invoke("open_settings_pane", { kind: "input_monitoring" });
 }
+
+export const relaunch = () => void invoke("app_restart").catch((e: unknown) => toast.error(errorMessage(e)));
 
 function Note({ icon: Icon, tone, children, action, className }: {
   icon: typeof Keyboard;
@@ -52,15 +57,35 @@ export function InputMonitoringNote({ className }: { className?: string }) {
   if (!usesFn) return null;
   const fallback = status.active.dictate;
   const meanwhile = fallback ? ` Until then, use ${acceleratorWords(fallback)}.` : "";
-  const restart = (
-    <Button size="sm" variant={status.restart_required ? "outline" : "ghost"} onClick={() => void invoke("app_restart").catch((e: unknown) => toast.error(errorMessage(e)))}>
-      Restart Comma
+  const relaunchButton = (primary: boolean) => (
+    <Button size="sm" variant={primary ? "outline" : "ghost"} onClick={relaunch}>
+      Relaunch Comma
     </Button>
   );
-  if (status.restart_required) {
+  if (status.restart_required || status.input_monitoring) {
     return (
-      <Note icon={CircleAlert} tone="warn" className={className} action={restart}>
-        Input Monitoring is allowed, but Comma needs a restart to use Fn.{meanwhile}
+      <Note icon={CircleAlert} tone="warn" className={className} action={relaunchButton(true)}>
+        Input Monitoring is allowed, but Comma needs a relaunch to use it.{meanwhile}
+      </Note>
+    );
+  }
+  if (status.requested) {
+    // Asked already in this run: another request would not prompt. Relaunch is the next step.
+    return (
+      <Note
+        icon={CircleAlert}
+        tone="warn"
+        className={className}
+        action={
+          <div className="flex items-center gap-1">
+            <Button size="sm" variant="ghost" onClick={() => void invoke("open_settings_pane", { kind: "input_monitoring" }).catch(() => {})}>
+              Open Settings
+            </Button>
+            {relaunchButton(true)}
+          </div>
+        }
+      >
+        Turned on Input Monitoring for Comma? Relaunch it to use Fn+Space.{meanwhile}
       </Note>
     );
   }
@@ -71,7 +96,7 @@ export function InputMonitoringNote({ className }: { className?: string }) {
       className={className}
       action={
         <div className="flex items-center gap-1">
-          {restart}
+          {relaunchButton(false)}
           <Button
             size="sm"
             variant="outline"
@@ -87,15 +112,20 @@ export function InputMonitoringNote({ className }: { className?: string }) {
         </div>
       }
     >
-      Fn shortcuts need Input Monitoring.{meanwhile} Already allowed? Restart Comma.
+      Fn shortcuts need Input Monitoring.{meanwhile} Already allowed? Relaunch Comma.
     </Note>
   );
 }
 
-/** macOS still runs its own Globe key action (emoji, input source, dictation) when Fn is pressed. */
+/**
+ * macOS still runs its own Globe key action (emoji, input source, dictation) when Fn is pressed; a
+ * listen-only tap cannot stop it. Read-only: Comma never changes the setting, it links to it.
+ */
 export function GlobeKeyNote({ className }: { className?: string }) {
   const status = useShortcutsStatus().data;
-  if (!status || status.globe_key === "none" || status.globe_key === "unknown" || status.listener !== "fn") return null;
+  const shortcuts = useSettings().data?.shortcuts;
+  const usesFn = !!shortcuts && (isFnAccelerator(shortcuts.dictate) || isFnAccelerator(shortcuts.ask) || isFnAccelerator(shortcuts.translate));
+  if (!status || !usesFn || status.globe_key === "none" || status.globe_key === "unknown" || status.swallow === "on") return null;
   const what = { input_source: "switches the input source", emoji: "opens the emoji picker", dictation: "starts macOS dictation" }[status.globe_key];
   return (
     <Note
@@ -108,7 +138,7 @@ export function GlobeKeyNote({ className }: { className?: string }) {
         </Button>
       }
     >
-      Fn also {what}. Set “Press Globe key to” to Do Nothing.
+      Fn also {what}. In Keyboard settings, set “Press 🌐 key to” to Do Nothing.
     </Note>
   );
 }

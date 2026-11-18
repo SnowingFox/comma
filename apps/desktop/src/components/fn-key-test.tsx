@@ -70,7 +70,7 @@ export function FnKeyTest() {
       </div>
       {usesFn && !trusted ? (
         <p className="text-label text-warning">
-          Without Input Monitoring macOS may not pass Fn to Comma, so the light can stay off. Allow it above.
+          Without Input Monitoring, macOS may pass Fn on its own but not Fn+Space or Esc. Allow it above.
         </p>
       ) : null}
       {usesFn && globe ? (

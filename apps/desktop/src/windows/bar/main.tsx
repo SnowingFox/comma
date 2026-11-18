@@ -155,8 +155,15 @@ function useBarLoop() {
           ],
         },
         input_monitoring: {
-          text: "Fn shortcuts need Input Monitoring.",
+          text: "Fn+Space and Esc need Input Monitoring.",
           actions: [{ label: "Allow", primary: true, onClick: () => void allowInputMonitoring().finally(dismiss) }],
+        },
+        relaunch: {
+          text: "Relaunch Comma to finish turning on Input Monitoring.",
+          actions: [
+            { label: "Relaunch", primary: true, onClick: () => void invoke("app_restart").finally(dismiss) },
+            { label: "Not now", onClick: dismiss },
+          ],
         },
         accessibility: {
           text: "Comma needs Accessibility to paste. Until then it copies.",
@@ -333,7 +340,7 @@ function useBarLoop() {
     void process();
   }, [process]);
 
-  const cancel = useCallback(() => {
+  const cancel = useCallback((quiet = false) => {
     if (answer !== null) {
       setAnswer(null);
       settle();
@@ -344,6 +351,12 @@ function useBarLoop() {
     generation.current += 1;
     closeRecorder();
     if (s === "processing") void invoke("pipeline_cancel").catch(() => {});
+    if (quiet) {
+      // A tap, not a deliberate cancel: just go away.
+      clearTimers();
+      settle();
+      return;
+    }
     if (sounds()) playTick("cancel");
     setShake((n) => n + 1);
     clearTimers();
@@ -353,7 +366,7 @@ function useBarLoop() {
   useShortcutEvents({
     onDown: start,
     onUp: stop,
-    onCancel: cancel,
+    onCancel: (_mode, quiet) => cancel(quiet),
     onSwitch: (mode, handsFree) => {
       modeRef.current = mode;
       setView((v) => (v.state === "recording" ? { ...v, mode, handsFree } : v));

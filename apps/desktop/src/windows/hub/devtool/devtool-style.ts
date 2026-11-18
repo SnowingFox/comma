@@ -3,7 +3,7 @@
 export const DEVTOOL_STYLE = `
 .cdt {
   display: contents;
-  --cdt-bg: rgb(28 29 34 / 0.98);
+  --cdt-bg: rgb(28 29 34);
   --cdt-bg-2: rgb(255 255 255 / 0.06);
   --cdt-bg-3: rgb(255 255 255 / 0.11);
   --cdt-fg: rgb(240 241 245);
@@ -130,7 +130,7 @@ export const DEVTOOL_STYLE = `
 .cdt-table th:first-child, .cdt-table td:first-child { text-align: left; }
 .cdt-table td { text-align: right; padding: 2px 4px; border-top: 1px solid var(--cdt-line); white-space: nowrap; }
 .cdt-table td[data-bad] { color: var(--cdt-bad); }
-.cdt-error { grid-column: 1 / -1; color: var(--cdt-bad); white-space: normal; text-align: left !important; }
+.cdt-table td.cdt-error { color: var(--cdt-bad); white-space: normal; overflow-wrap: anywhere; text-align: left; }
 .cdt-log {
   flex: 1; min-height: 0; margin: 0; padding: 6px; overflow: auto; border-radius: 6px; background: rgb(0 0 0 / 0.35);
   font: 10px / 1.45 var(--cdt-mono); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text;
