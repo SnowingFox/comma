@@ -34,6 +34,9 @@ pub enum ErrorCode {
     Upstream,
     /// The Comma server answered with an error; `reason` carries its code.
     Server,
+    /// The recording held no speech.
+    NoSpeech,
+    Cancelled,
 }
 
 impl AppError {
@@ -66,6 +69,31 @@ impl std::error::Error for AppError {}
 impl From<std::io::Error> for AppError {
     fn from(err: std::io::Error) -> Self {
         Self::new(ErrorCode::Io, err.to_string())
+    }
+}
+
+impl From<comma_voice::VoiceError> for AppError {
+    fn from(err: comma_voice::VoiceError) -> Self {
+        use comma_voice::VoiceError as V;
+        let message = err.to_string();
+        let code = match &err {
+            V::InvalidKey { .. } => ErrorCode::InvalidKey,
+            V::MissingPermission { .. } => {
+                return Self::new(ErrorCode::MissingPermission, message).with_reason("missing_permissions");
+            }
+            V::Unreachable { .. } => ErrorCode::Unreachable,
+            V::Timeout { .. } => ErrorCode::Timeout,
+            V::UnknownModel { .. } => ErrorCode::UnknownModel,
+            V::Quota { .. } => ErrorCode::RateLimited,
+            V::NoSpeech => ErrorCode::NoSpeech,
+            V::Provider { request_id: Some(id), .. } => {
+                return Self::new(ErrorCode::Upstream, format!("{message} (request {id})"));
+            }
+            V::Provider { .. } | V::Stream { .. } | V::InvalidResponse { .. } => ErrorCode::Upstream,
+            V::InvalidInput(_) => ErrorCode::InvalidInput,
+            V::Cancelled => ErrorCode::Cancelled,
+        };
+        Self::new(code, message)
     }
 }
 

@@ -578,6 +578,7 @@ name = "comma"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "comma-voice",
  "keyring",
  "objc2-av-foundation",
  "reqwest",
@@ -588,6 +589,21 @@ dependencies = [
  "tauri-plugin-opener",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "wiremock",
+]
+
+[[package]]
+name = "comma-voice"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
  "uuid",
  "wiremock",
 ]

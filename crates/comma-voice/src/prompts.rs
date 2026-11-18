@@ -169,6 +169,53 @@ pub fn parse_ask_output(text: &str) -> (Delivery, String) {
     (delivery, body.trim().to_owned())
 }
 
+/// Streaming counterpart of [`parse_ask_output`]: holds deltas back until the header line is
+/// complete, then passes the body through. Call [`AskHeaderStripper::end`] after the last delta.
+#[derive(Debug, Default)]
+pub struct AskHeaderStripper {
+    buf: String,
+    in_body: bool,
+    delivery: Option<Delivery>,
+}
+
+impl AskHeaderStripper {
+    pub fn push(&mut self, delta: &str) -> String {
+        if self.in_body {
+            return delta.to_owned();
+        }
+        self.buf.push_str(delta);
+        if !self.buf.contains('\n') && self.buf.chars().count() < 48 {
+            return String::new();
+        }
+        self.release()
+    }
+
+    pub fn end(&mut self) -> String {
+        if self.in_body { String::new() } else { self.release() }
+    }
+
+    /// Known once the header line is complete; `External` when there is none.
+    pub fn delivery(&self) -> Delivery {
+        self.delivery.unwrap_or(Delivery::External)
+    }
+
+    fn release(&mut self) -> String {
+        self.in_body = true;
+        let buf = std::mem::take(&mut self.buf);
+        let trimmed = buf.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("DELIVERY:") {
+            let (first, body) = rest.split_once('\n').unwrap_or((rest, ""));
+            match first.trim().to_lowercase().as_str() {
+                "inline" => self.delivery = Some(Delivery::Inline),
+                "external" => self.delivery = Some(Delivery::External),
+                _ => return buf,
+            }
+            return body.trim_start_matches(['\r', '\n']).to_owned();
+        }
+        buf
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +270,21 @@ mod tests {
         let mut i = input(Mode::Dictate, "a");
         i.marker = None;
         assert_ne!(build(&i).user, build(&i).user);
+    }
+
+    #[test]
+    fn streaming_header_is_stripped() {
+        let mut s = AskHeaderStripper::default();
+        let mut out = String::new();
+        for piece in ["DELI", "VERY: in", "line\nShort", "er text."] {
+            out.push_str(&s.push(piece));
+        }
+        out.push_str(&s.end());
+        assert_eq!((out.as_str(), s.delivery()), ("Shorter text.", Delivery::Inline));
+
+        let mut s = AskHeaderStripper::default();
+        let out = s.push("An answer without a header") + &s.end();
+        assert_eq!((out.as_str(), s.delivery()), ("An answer without a header", Delivery::External));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 use crate::error::{AppError, AppResult};
 
 pub const FILE_NAME: &str = "settings.json";
-pub const MAGPIE_BASE_URL: &str = "http://127.0.0.1:3425/v1";
+pub use comma_voice::llm::MAGPIE_BASE_URL;
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8787";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -30,16 +30,8 @@ pub enum ThemePreference {
     Dark,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ReasoningEffort {
-    Off,
-    Low,
-    Medium,
-    High,
-    #[default]
-    Default,
-}
+/// Off maps to `"none"` on the wire, Default omits the field (spec 3.2).
+pub use comma_voice::llm::ReasoningEffort;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

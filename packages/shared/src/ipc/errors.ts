@@ -21,6 +21,9 @@ export const AppErrorCode = z.enum([
   "upstream",
   /** The Comma server answered with an error; `reason` carries its `ErrorCode`. */
   "server",
+  /** The recording held no speech. */
+  "no_speech",
+  "cancelled",
 ]);
 export type AppErrorCode = z.infer<typeof AppErrorCode>;
 

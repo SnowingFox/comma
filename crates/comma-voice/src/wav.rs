@@ -1,4 +1,5 @@
-//! WAV helpers: encode 16-bit mono PCM, read a WAV's duration, and the short clip `stt_test` sends.
+//! WAV helpers: encode 16-bit mono PCM, read a WAV's duration, and a short test clip for checking
+//! a speech-to-text key without a microphone.
 
 pub const TEST_SAMPLE_RATE: u32 = 16_000;
 
@@ -46,7 +47,7 @@ pub fn test_clip() -> Vec<u8> {
 
 /// Duration from the `fmt ` byte rate and the `data` chunk size. `None` for anything that is not a
 /// PCM WAV this function can read.
-pub fn wav_duration_secs(bytes: &[u8]) -> Option<f64> {
+pub fn duration_secs(bytes: &[u8]) -> Option<f64> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return None;
     }
@@ -87,7 +88,7 @@ mod tests {
     #[test]
     fn test_clip_is_one_quiet_second() {
         let wav = test_clip();
-        assert_eq!(wav_duration_secs(&wav), Some(1.0));
+        assert_eq!(duration_secs(&wav), Some(1.0));
         let peak = wav[44..].as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b).unsigned_abs()).max().unwrap();
         assert!(peak > 1000 && peak < i16::MAX as u16 / 4, "peak {peak}");
         // Soft edges: the first sample is silent.
@@ -100,8 +101,8 @@ mod tests {
         // Insert a LIST chunk between fmt and data, as some encoders do.
         let list = [b"LIST".as_slice(), &4u32.to_le_bytes(), b"INFO"].concat();
         wav.splice(36..36, list);
-        assert_eq!(wav_duration_secs(&wav), Some(0.5));
-        assert_eq!(wav_duration_secs(b"OggS...."), None);
-        assert_eq!(wav_duration_secs(&wav[..20]), None);
+        assert_eq!(duration_secs(&wav), Some(0.5));
+        assert_eq!(duration_secs(b"OggS...."), None);
+        assert_eq!(duration_secs(&wav[..20]), None);
     }
 }

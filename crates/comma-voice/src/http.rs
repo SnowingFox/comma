@@ -1,11 +1,14 @@
 //! Shared HTTP client and the helpers that turn transport failures into precise, key-free errors.
 
+use std::future::Future;
 use std::time::Duration;
 
-use crate::error::{AppError, ErrorCode};
+use tokio_util::sync::CancellationToken;
 
-/// One client for the whole app: rustls, no system proxy (local endpoints must not be proxied),
-/// a short connect timeout. Each request sets its own total timeout.
+use crate::error::{VoiceError, VoiceResult};
+
+/// A client suitable for every provider: rustls, no system proxy (local endpoints must not be
+/// proxied), a short connect timeout. Each request sets its own total timeout.
 pub fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("Comma/", env!("CARGO_PKG_VERSION")))
@@ -15,11 +18,10 @@ pub fn client() -> reqwest::Client {
         .expect("the HTTP client configuration is static")
 }
 
-/// `127.0.0.1:3425` from `http://127.0.0.1:3425/v1`.
+/// `127.0.0.1:3425` from `http://127.0.0.1:3425/v1`, without any `user:pass@`.
 pub fn host_of(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    // Drop userinfo so a `user:pass@host` URL never ends up in a message.
     host.rsplit_once('@').map_or(host, |(_, h)| h)
 }
 
@@ -30,17 +32,24 @@ pub fn is_loopback(url: &str) -> bool {
 }
 
 /// A request that never got an HTTP answer: refused, unresolvable, TLS failure or timed out.
-pub fn send_error(err: &reqwest::Error, service: &str, timeout: Duration) -> AppError {
+pub fn send_error(err: &reqwest::Error, service: &str, timeout: Duration) -> VoiceError {
     if err.is_timeout() {
-        return AppError::new(
-            ErrorCode::Timeout,
-            format!("{service} did not answer within {} s", timeout.as_secs_f32().round()),
-        );
+        VoiceError::Timeout { service: service.into(), after: timeout }
+    } else {
+        VoiceError::Unreachable { service: service.into() }
     }
-    if err.is_connect() || err.is_request() {
-        return AppError::new(ErrorCode::Unreachable, format!("Can't reach {service}"));
+}
+
+/// Runs `fut` unless `cancel` fires first.
+pub async fn cancellable<T>(cancel: Option<&CancellationToken>, fut: impl Future<Output = T>) -> VoiceResult<T> {
+    match cancel {
+        Some(token) => tokio::select! {
+            biased;
+            () = token.cancelled() => Err(VoiceError::Cancelled),
+            value = fut => Ok(value),
+        },
+        None => Ok(fut.await),
     }
-    AppError::new(ErrorCode::Upstream, format!("The connection to {service} failed"))
 }
 
 /// Replaces every occurrence of each secret with `[redacted]`. Applied to anything upstream sends
@@ -64,11 +73,6 @@ pub fn clip_detail(text: &str, secrets: &[&str], max: usize) -> String {
     format!("{}…", cut.trim_end())
 }
 
-/// Milliseconds with one decimal.
-pub fn ms(elapsed: Duration) -> f64 {
-    (elapsed.as_secs_f64() * 10_000.0).round() / 10.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +93,14 @@ mod tests {
         assert_eq!(clip_detail("abcdefghijkl", &[], 5), "abcde…");
         // Short strings are not treated as secrets, so they cannot blank out ordinary words.
         assert_eq!(redact("a b", &["a"]), "a b");
+    }
+
+    #[tokio::test]
+    async fn cancellation_wins() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let out = cancellable(Some(&token), std::future::pending::<()>()).await;
+        assert_eq!(out, Err(VoiceError::Cancelled));
+        assert_eq!(cancellable(None, async { 3 }).await, Ok(3));
     }
 }

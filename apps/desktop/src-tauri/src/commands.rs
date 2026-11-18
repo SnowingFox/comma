@@ -5,23 +5,23 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use comma_voice::llm::{self as voice_llm, ChatModel, ChatRequest, Message, OpenAiCompatible};
+use comma_voice::pipeline::{self, RefineContext};
+use comma_voice::prompts::{Delivery, Mode};
+use comma_voice::stt::{Audio, ElevenLabs, SpeechToText, SttOptions};
+use comma_voice::{CancellationToken, http, wav};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tauri::{AppHandle, State};
 
 use crate::account::{self, Server};
-use crate::audio;
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::http;
-use crate::llm::{self, ChatRequest, Endpoint, Message};
 use crate::permissions::{self, PermissionsStatus, SettingsPaneKind};
-use crate::prompts::{self, Delivery, Mode, PromptInput};
 use crate::secrets::{self, ACCOUNT_ACCESS, ACCOUNT_REFRESH, SecretName, SecretStatus, SecretStore};
 use crate::settings::{self, AppMode, MAGPIE_BASE_URL, ReasoningEffort, Settings};
-use crate::stt;
 use crate::windows::{self, WindowLabel};
 
 /// ElevenLabs accepts up to 3 GB, but a dictation clip over 25 MB (13 min of 16 kHz PCM) is a bug.
@@ -34,8 +34,12 @@ pub struct AppState {
     pub settings_path: PathBuf,
     pub secrets: Box<dyn SecretStore>,
     pub http: reqwest::Client,
-    /// `stt::ELEVENLABS_BASE_URL`, replaced by a mock server in tests.
+    /// `comma_voice::stt::ELEVENLABS_BASE_URL`, replaced by a mock server in tests.
     pub elevenlabs_base_url: String,
+}
+
+fn ms(d: Duration) -> f64 {
+    (d.as_secs_f64() * 10_000.0).round() / 10.0
 }
 
 impl AppState {
@@ -45,7 +49,7 @@ impl AppState {
             settings_path,
             secrets,
             http: http::client(),
-            elevenlabs_base_url: stt::ELEVENLABS_BASE_URL.into(),
+            elevenlabs_base_url: comma_voice::stt::ELEVENLABS_BASE_URL.into(),
         }
     }
 
@@ -67,7 +71,7 @@ impl AppState {
 
     /// The LLM endpoint for `base_url`, or the saved one. magpie needs no key, so the stored key
     /// (which belongs to the custom endpoint) is only sent elsewhere.
-    fn llm_endpoint(&self, base_url: Option<String>) -> AppResult<Endpoint> {
+    fn llm_endpoint(&self, base_url: Option<String>) -> AppResult<OpenAiCompatible> {
         let base_url = match base_url.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty()) {
             Some(url) => url,
             None => self.settings()?.llm.base_url.clone(),
@@ -78,12 +82,15 @@ impl AppState {
         } else {
             secrets::get_key(self.secrets.as_ref(), SecretName::Llm)?
         };
-        Ok(Endpoint { base_url, api_key })
+        Ok(OpenAiCompatible::new(self.http.clone(), base_url, api_key))
     }
 
-    fn elevenlabs_key(&self) -> AppResult<String> {
-        secrets::get_key(self.secrets.as_ref(), SecretName::Elevenlabs)?
-            .ok_or_else(|| AppError::new(ErrorCode::NotConfigured, "Add your ElevenLabs API key first"))
+    /// ElevenLabs with the stored key and the saved model.
+    fn elevenlabs(&self) -> AppResult<ElevenLabs> {
+        let key = secrets::get_key(self.secrets.as_ref(), SecretName::Elevenlabs)?
+            .ok_or_else(|| AppError::new(ErrorCode::NotConfigured, "Add your ElevenLabs API key first"))?;
+        let model_id = self.settings()?.stt.model_id.clone();
+        Ok(ElevenLabs::new(self.http.clone(), key, model_id).with_base_url(&self.elevenlabs_base_url))
     }
 
     fn server_url(&self) -> AppResult<String> {
@@ -140,8 +147,7 @@ pub async fn llm_models(state: State<'_, AppState>, base_url: Option<String>) ->
 }
 
 pub async fn llm_models_impl(state: &AppState, base_url: Option<String>) -> AppResult<Vec<String>> {
-    let ep = state.llm_endpoint(base_url)?;
-    llm::list_models(&state.http, &ep, llm::models_timeout(&ep.base_url)).await
+    Ok(state.llm_endpoint(base_url)?.list_models().await?)
 }
 
 #[derive(Debug, Serialize)]
@@ -163,6 +169,7 @@ pub async fn llm_test(
     llm_test_impl(&state, base_url, model, reasoning_effort).await
 }
 
+/// One tiny streamed completion.
 pub async fn llm_test_impl(
     state: &AppState,
     base_url: Option<String>,
@@ -170,27 +177,25 @@ pub async fn llm_test_impl(
     reasoning_effort: Option<ReasoningEffort>,
 ) -> AppResult<LlmTestResult> {
     let saved = state.snapshot()?.llm;
-    let ep = state.llm_endpoint(base_url)?;
+    let endpoint = state.llm_endpoint(base_url)?;
     let model = model.map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()).unwrap_or(saved.model);
     if model.is_empty() {
         return Err(AppError::new(ErrorCode::NotConfigured, "Pick a model first"));
     }
-    let req = ChatRequest {
+    let mut req = ChatRequest::new(
         model,
-        messages: vec![
-            Message::system("You are a connection check. Answer with one word."),
-            Message::user("Reply with the word: ready"),
-        ],
-        reasoning_effort: reasoning_effort.unwrap_or(saved.reasoning_effort),
-        // Room for a reasoning model to think briefly and still answer.
-        max_tokens: Some(64),
-    };
-    let out = llm::chat(&state.http, &ep, &req, LLM_TEST_TIMEOUT).await?;
+        vec![Message::system("You are a connection check. Answer with one word."), Message::user("Reply with the word: ready")],
+    );
+    req.reasoning_effort = reasoning_effort.unwrap_or(saved.reasoning_effort);
+    // Room for a reasoning model to think briefly and still answer.
+    req.max_tokens = Some(64);
+    req.timeout = LLM_TEST_TIMEOUT;
+    let out = voice_llm::complete(&endpoint, req, CancellationToken::new(), |_| {}).await?;
     Ok(LlmTestResult {
         model: out.model,
-        ttft_ms: out.ttft_ms,
-        total_ms: out.total_ms,
-        reasoning_tokens: out.reasoning_tokens,
+        ttft_ms: out.ttft.map(ms),
+        total_ms: ms(out.total),
+        reasoning_tokens: out.usage.reasoning_tokens,
         reply: out.text.chars().take(80).collect(),
     })
 }
@@ -210,13 +215,12 @@ pub async fn stt_test(state: State<'_, AppState>) -> AppResult<SttTestResult> {
     stt_test_impl(&state).await
 }
 
+/// Sends a generated one-second clip: proves the key, the permission and the model.
 pub async fn stt_test_impl(state: &AppState) -> AppResult<SttTestResult> {
-    let key = state.elevenlabs_key()?;
-    let model_id = state.snapshot()?.stt.model_id;
-    let client = stt::Client { http: &state.http, base_url: &state.elevenlabs_base_url, api_key: &key, model_id: &model_id };
-    let started = Instant::now();
-    let out = client.transcribe(audio::test_clip(), None, stt::timeout_for(Some(1.0))).await?;
-    Ok(SttTestResult { model_id, total_ms: http::ms(started.elapsed()), text: out.text, language_code: out.language_code })
+    let stt = state.elevenlabs()?;
+    let opts = SttOptions { auto_detect: true, ..Default::default() };
+    let out = stt.transcribe(Audio::wav(wav::test_clip()), &opts).await?;
+    Ok(SttTestResult { model_id: stt.model_id().to_owned(), total_ms: ms(out.timing), text: out.text, language_code: out.language })
 }
 
 #[derive(Debug, Serialize)]
@@ -238,24 +242,24 @@ pub async fn stt_transcribe_impl(state: &AppState, wav_base64: &str) -> AppResul
     if wav_base64.len() > MAX_WAV_BYTES / 3 * 4 + 4 {
         return Err(AppError::invalid("The recording is too long"));
     }
-    let wav = base64::engine::general_purpose::STANDARD
+    let bytes = base64::engine::general_purpose::STANDARD
         .decode(wav_base64.trim())
         .map_err(|_| AppError::invalid("The recording is not valid base64"))?;
-    let measured = audio::wav_duration_secs(&wav).ok_or_else(|| AppError::invalid("The recording is not a WAV file"))?;
+    let measured = wav::duration_secs(&bytes).ok_or_else(|| AppError::invalid("The recording is not a WAV file"))?;
     if measured < 0.2 {
         return Err(AppError::invalid("The recording is too short. Hold the key a little longer"));
     }
-    let key = state.elevenlabs_key()?;
-    let s = state.snapshot()?;
-    let client = stt::Client { http: &state.http, base_url: &state.elevenlabs_base_url, api_key: &key, model_id: &s.stt.model_id };
-    let out = stt::transcribe_with_retry(&client, wav, &s.languages.spoken, s.languages.auto_detect, stt::timeout_for(Some(measured))).await?;
+    let stt = state.elevenlabs()?;
+    let languages = state.snapshot()?.languages;
+    let opts = SttOptions { languages: languages.spoken, auto_detect: languages.auto_detect, ..Default::default() };
+    let out = stt.transcribe(Audio::wav(bytes), &opts).await?;
     Ok(Transcription {
-        text: out.transcript.text,
-        language_code: out.transcript.language_code,
-        language_probability: out.transcript.language_probability,
-        duration_secs: out.transcript.duration_secs.or(Some(measured)),
-        total_ms: out.total_ms,
-        retried: out.retried,
+        retried: out.retried(),
+        text: out.text,
+        language_code: out.language,
+        language_probability: out.language_probability,
+        duration_secs: Some(out.duration.map_or(measured, |d| d.as_secs_f64())),
+        total_ms: ms(out.timing),
     })
 }
 
@@ -300,35 +304,25 @@ pub async fn refine_text_impl(
     if s.llm.model.is_empty() {
         return Err(AppError::new(ErrorCode::NotConfigured, "Pick an LLM model first"));
     }
-    let ep = state.llm_endpoint(None)?;
-    let target = target_language
+    let endpoint = state.llm_endpoint(None)?;
+    let mut ctx = RefineContext::new(mode, s.llm.model.clone());
+    ctx.reasoning_effort = s.llm.reasoning_effort;
+    ctx.languages = s.languages.spoken.clone();
+    ctx.target_language = target_language
         .filter(|t| !t.trim().is_empty())
-        .or_else(|| s.languages.translate_targets.first().cloned())
-        .map(|t| prompts::language_name(&t));
-    let prompt = prompts::build(&PromptInput {
+        .or_else(|| s.languages.translate_targets.first().cloned());
+    ctx.app = Some("Comma setup".into());
+    ctx.selected_text = selected_text;
+    ctx.timeout = REFINE_TIMEOUT;
+    let out = pipeline::refine(&endpoint, text, &ctx, CancellationToken::new(), |_| {}).await?;
+    Ok(RefineResult {
         mode,
-        transcript: text,
-        languages: &s.languages.spoken,
-        target_language: target.as_deref(),
-        dictionary: &[],
-        app: Some("Comma setup"),
-        selected_text: selected_text.as_deref(),
-        marker: None,
-    });
-    let req = ChatRequest {
-        model: s.llm.model.clone(),
-        messages: vec![Message::system(prompt.system), Message::user(prompt.user)],
-        reasoning_effort: s.llm.reasoning_effort,
-        max_tokens: None,
-    };
-    let out = llm::chat(&state.http, &ep, &req, REFINE_TIMEOUT).await?;
-    let (delivery, text) = if mode == Mode::Ask {
-        let (delivery, body) = prompts::parse_ask_output(&out.text);
-        (Some(delivery), body)
-    } else {
-        (None, out.text)
-    };
-    Ok(RefineResult { mode, text, delivery, model: out.model, ttft_ms: out.ttft_ms, total_ms: out.total_ms })
+        text: out.text,
+        delivery: out.delivery,
+        model: out.model,
+        ttft_ms: out.ttft.map(ms),
+        total_ms: ms(out.total),
+    })
 }
 
 // ---- Comma account ------------------------------------------------------------------------------
@@ -525,9 +519,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = state(&dir);
         secrets::set_secret(state.secrets.as_ref(), SecretName::Llm, "sk-custom").unwrap();
-        assert!(state.llm_endpoint(None).unwrap().api_key.is_none());
+        assert!(format!("{:?}", state.llm_endpoint(None).unwrap()).contains("has_key: false"));
         let custom = state.llm_endpoint(Some("https://api.example.com/v1".into())).unwrap();
-        assert_eq!(custom.api_key.as_deref(), Some("sk-custom"));
+        assert!(format!("{custom:?}").contains("has_key: true"));
         assert_eq!(state.llm_endpoint(Some("ftp://x".into())).unwrap_err().code, ErrorCode::InvalidInput);
     }
 
@@ -557,7 +551,7 @@ mod tests {
         assert_eq!(stt_transcribe_impl(&state, "@@@").await.unwrap_err().code, ErrorCode::InvalidInput);
         let not_wav = base64::engine::general_purpose::STANDARD.encode(b"hello");
         assert!(stt_transcribe_impl(&state, &not_wav).await.unwrap_err().message.contains("not a WAV"));
-        let short = base64::engine::general_purpose::STANDARD.encode(audio::encode_wav(&[0; 800], 16_000));
+        let short = base64::engine::general_purpose::STANDARD.encode(wav::encode_wav(&[0; 800], 16_000));
         assert!(stt_transcribe_impl(&state, &short).await.unwrap_err().message.contains("too short"));
     }
 

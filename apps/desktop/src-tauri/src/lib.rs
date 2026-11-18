@@ -1,14 +1,9 @@
 mod account;
-mod audio;
 mod commands;
 mod error;
-mod http;
-mod llm;
 mod permissions;
-mod prompts;
 mod secrets;
 mod settings;
-mod stt;
 mod tray;
 mod windows;
 

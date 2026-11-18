@@ -9,8 +9,9 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use comma_voice::http;
+
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::http;
 
 const SERVICE: &str = "the Comma server";
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -117,7 +118,7 @@ impl Server<'_> {
 }
 
 fn unreachable(err: &reqwest::Error, base_url: &str, timeout: Duration) -> AppError {
-    let mut e = http::send_error(err, SERVICE, timeout);
+    let mut e = AppError::from(http::send_error(err, SERVICE, timeout));
     if e.code == ErrorCode::Unreachable {
         e.message = format!("Can't reach the Comma server at {}", http::host_of(base_url));
     }
