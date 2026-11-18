@@ -303,6 +303,20 @@ mod mac {
         use super::*;
 
         #[test]
+        #[ignore = "creates an active HID tap for a moment; run with --ignored"]
+        fn real_swallow_tap() {
+            let bindings = FnBindings { dictate: Some(crate::binding::FnBinding::Fn), ..Default::default() };
+            match FnTap::start(bindings, TapMode::Swallow, |_| {}) {
+                Ok(tap) => {
+                    println!("swallow tap started: {:?}", tap.mode());
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    tap.stop();
+                }
+                Err(e) => println!("swallow tap: {e}"),
+            }
+        }
+
+        #[test]
         #[ignore = "reads the Input Monitoring state; run with --ignored"]
         fn real_input_monitoring_state() {
             let granted = input_monitoring_granted();
