@@ -16,13 +16,21 @@ import {
 export class IpcError extends Error {
   readonly code: string;
   readonly command: CommandName;
+  /** Upstream machine code, e.g. the Comma server's `email_not_verified`. */
+  readonly reason: string | undefined;
 
-  constructor(command: CommandName, code: string, message: string) {
+  constructor(command: CommandName, code: string, message: string, reason?: string) {
     super(message);
     this.name = "IpcError";
     this.code = code;
     this.command = command;
+    this.reason = reason;
   }
+}
+
+/** The text to show for any rejected promise. */
+export function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** True inside a Tauri window; false in a plain browser on the Vite dev server. */
@@ -66,7 +74,7 @@ export async function invoke<N extends CommandName>(
     raw = await (await getTransport())(command, input.data as Record<string, unknown>);
   } catch (err) {
     const parsed = AppError.safeParse(err);
-    if (parsed.success) throw new IpcError(command, parsed.data.code, parsed.data.message);
+    if (parsed.success) throw new IpcError(command, parsed.data.code, parsed.data.message, parsed.data.reason);
     throw new IpcError(command, "internal", err instanceof Error ? err.message : String(err));
   }
 
