@@ -1,5 +1,6 @@
 // `no-inline`: the CSP allows scripts from the app only, so the worklet must be a file, not a data: URL.
 import workletUrl from "./pcm-worklet.js?url&no-inline";
+import { encodeOggOpus } from "./ogg-opus";
 
 /** ElevenLabs takes any rate; 16 kHz mono keeps uploads small (spec 3.1). */
 export const TARGET_RATE = 16_000;
@@ -79,10 +80,16 @@ export class Recorder {
   }
 
   stop(): Recording {
+    const { samples, peak } = this.stopSamples();
+    return { wavBase64: toBase64(encodeWav(samples, TARGET_RATE)), durationSecs: samples.length / TARGET_RATE, peak };
+  }
+
+  /** 16 kHz samples captured since `start()`. */
+  stopSamples(): { samples: Float32Array; peak: number } {
     this.capturing = false;
     const samples = resample(concat(this.chunks), this.context.sampleRate, TARGET_RATE);
     this.chunks = [];
-    return { wavBase64: toBase64(encodeWav(samples, TARGET_RATE)), durationSecs: samples.length / TARGET_RATE, peak: this.peak };
+    return { samples, peak: this.peak };
   }
 
   close() {
@@ -146,7 +153,23 @@ export function encodeWav(samples: Float32Array, rate: number): Uint8Array {
   return bytes;
 }
 
-function toBase64(bytes: Uint8Array): string {
+export type EncodedClip = { base64: string; format: "ogg" | "wav"; bytes: number; durationSecs: number; encodeMs: number };
+
+/** Ogg/Opus when the webview can encode it (about 8x smaller), else WAV. */
+export async function encodeClip(samples: Float32Array): Promise<EncodedClip> {
+  const started = performance.now();
+  const ogg = await encodeOggOpus(samples, TARGET_RATE);
+  const bytes = ogg ?? encodeWav(samples, TARGET_RATE);
+  return {
+    base64: toBase64(bytes),
+    format: ogg ? "ogg" : "wav",
+    bytes: bytes.length,
+    durationSecs: samples.length / TARGET_RATE,
+    encodeMs: performance.now() - started,
+  };
+}
+
+export function toBase64(bytes: Uint8Array): string {
   let binary = "";
   const step = 0x8000;
   for (let i = 0; i < bytes.length; i += step) binary += String.fromCharCode(...bytes.subarray(i, i + step));
