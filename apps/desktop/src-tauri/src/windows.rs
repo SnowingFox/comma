@@ -101,7 +101,8 @@ pub fn set_bar<R: Runtime>(app: &AppHandle<R>, layout: BarLayout, interactive: b
         let area = monitor.work_area();
         let scale = monitor.scale_factor();
         let size = ((w * scale).round() as u32, (h * scale).round() as u32);
-        let margin = ((BAR_BOTTOM_MARGIN - if layout == BarLayout::Full { 12.0 } else { 0.0 }) * scale).round() as i32;
+        // The page keeps 12 px under the pill, so the pill sits BAR_BOTTOM_MARGIN above the Dock.
+        let margin = ((BAR_BOTTOM_MARGIN - 12.0) * scale).round() as i32;
         let (x, y) = bar_origin((area.position.x, area.position.y), (area.size.width, area.size.height), size, margin);
         win.set_position(PhysicalPosition::new(x, y))?;
     }

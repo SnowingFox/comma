@@ -114,6 +114,8 @@ export const events = {
   "bar://preview": BarPreviewPayload,
   "bar://hint": BarHintPayload,
   "history://changed": HistoryChangedPayload,
+  /** Bar -> hub: open a page (and section, e.g. a run id in History). */
+  "hub://open": z.object({ page: z.enum(["home", "history", "dictionary", "usage", "settings"]), section: z.string().max(64).optional() }),
   /** Any window changed settings; the others refetch. */
   "settings://changed": z.object({}),
   "onboarding://restart": OnboardingRestartPayload,

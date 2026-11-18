@@ -133,7 +133,6 @@ pub fn on_action(app: &AppHandle, action: &Action, target: Target) {
     let state = app.state::<AppState>();
     match action {
         Action::Start(mode) => {
-            crate::ducking::duck(&state);
             let seq = {
                 let Ok(mut session) = state.session.lock() else { return };
                 session.seq += 1;
@@ -143,6 +142,7 @@ pub fn on_action(app: &AppHandle, action: &Action, target: Target) {
             if target == Target::Onboarding {
                 return;
             }
+            crate::ducking::duck(&state);
             let _ = crate::windows::prepare_bar(app);
             let captured = capture(&state, run_mode(*mode));
             if let Ok(mut session) = state.session.lock()
