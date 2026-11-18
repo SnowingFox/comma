@@ -1,0 +1,67 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "@multica/ui/styles/tokens.css";
+@import "@multica/ui/styles/theme-variables.css";
+@import "@multica/ui/styles/base.css";
+
+/* Multica UI lives outside this app's root; scan it for class names. */
+@source "../../../../packages/multica-ui/components";
+@source "../../../../packages/multica-ui/lib";
+
+/* next-themes puts `dark` on <html>; tokens.css keys its dark values to it. */
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --font-sans: "Inter Variable", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --font-serif: ui-serif, "New York", Georgia, serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  /* Five nav items need less than Multica's 280px default. */
+  --sidebar-panel-width: 232px;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+.selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* The floating bar paints only its pill; the window itself is transparent. */
+html.bar-window,
+html.bar-window body {
+  background: transparent !important;
+}
+
+/* Processing: a highlight runs along the folded waveform. */
+@keyframes bar-shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(200%); }
+}
+
+.bar-shimmer {
+  animation: bar-shimmer 1.1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar-shimmer {
+    animation: none;
+    left: 25%;
+    opacity: 0.6;
+  }
+}
