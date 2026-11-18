@@ -144,6 +144,7 @@ pub fn run() {
             commands::shortcuts_suspend,
             commands::shortcuts_restart,
             commands::shortcuts_probe,
+            commands::shortcuts_set_swallow,
             commands::pipeline_check,
             commands::log_tail,
             commands::log_write,

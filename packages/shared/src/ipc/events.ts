@@ -7,8 +7,11 @@ export type RunMode = z.infer<typeof RunMode>;
 export const RunStage = z.enum(["stt", "llm", "paste"]);
 export type RunStage = z.infer<typeof RunStage>;
 
-/** `shortcut://down` starts a recording, `up` ends it, `cancel` drops it (Esc, or a stray key during a short press). */
-export const ShortcutPayload = z.object({ mode: RunMode });
+/**
+ * `shortcut://down` starts a recording, `up` ends it, `cancel` drops it (Esc, a stray key during a short press, or a
+ * tap too short to hold speech: then `quiet`, and the bar goes away without the cancel sound).
+ */
+export const ShortcutPayload = z.object({ mode: RunMode, quiet: z.boolean().optional() });
 export type ShortcutPayload = z.infer<typeof ShortcutPayload>;
 
 /** `shortcut://switch`: the running recording changed mode (Fn then Space) or locked hands-free (Fn pressed twice). */
@@ -41,8 +44,14 @@ export const ShortcutsStatus = z.object({
   /** The Fn tap. macOS creates one even without Input Monitoring, so `running` alone proves nothing. */
   tap: z.enum(["running", "off", "failed"]),
   tap_error: z.string().nullable(),
-  /** Some keyboard event reached the tap since it started. */
+  /** Some keyboard event reached the tap since it started (without Input Monitoring: modifier changes such as Fn). */
   tap_delivered: z.boolean(),
+  /** A key press reached the tap: Input Monitoring is in effect for this process, whatever the preflight says. */
+  tap_keys: z.boolean(),
+  /** Input Monitoring was asked for in this process; asking again would not show the prompt. Offer a relaunch. */
+  requested: z.boolean(),
+  /** Experimental active tap that swallows Fn (Globe key action): `unavailable` without Accessibility. */
+  swallow: z.enum(["off", "on", "unavailable"]),
   /** The Input Monitoring preflight, as this process sees it. */
   input_monitoring: z.boolean(),
   /** Allowed, but the tap does not start: macOS applies it after Comma restarts. */
@@ -57,6 +66,8 @@ export const ShortcutActionPayload = z.object({
   action: z.enum(["start", "switch", "stop", "cancel", "hint"]),
   mode: RunMode,
   hands_free: z.boolean().optional(),
+  /** A cancel for a tap shorter than the hold threshold (no second press followed). */
+  quiet: z.boolean().optional(),
   /** `fn`: the Fn tap; `plugin`: an ordinary registered shortcut. */
   source: z.enum(["fn", "plugin"]),
   /** Where the down, up, cancel and switch events went. */
@@ -83,7 +94,18 @@ export const RunOutput = z.enum(["pasted", "copied", "answer", "none"]);
 export type RunOutput = z.infer<typeof RunOutput>;
 
 /** Bar hints (spec 2.3.1). */
-export const HintKind = z.enum(["ask_hold", "hands_free", "copied", "microphone", "input_monitoring", "accessibility", "microphone_denied", "signed_out"]);
+export const HintKind = z.enum([
+  "ask_hold",
+  "hands_free",
+  "copied",
+  "microphone",
+  "input_monitoring",
+  "accessibility",
+  "microphone_denied",
+  "signed_out",
+  /** Input Monitoring was asked for or allowed, but only a relaunch applies it. */
+  "relaunch",
+]);
 export type HintKind = z.infer<typeof HintKind>;
 
 /** Result of `pipeline_run`, also carried by `run://done`. */

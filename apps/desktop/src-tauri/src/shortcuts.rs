@@ -6,11 +6,15 @@
 //! and the context capture for the run. Esc is listened for only while a recording, a run or an
 //! answer card is open.
 //!
-//! macOS creates a listen-only tap even without Input Monitoring and then filters what it gets, so
-//! a running tap does not prove the permission. The Fn shortcuts count as working only when the
-//! tap runs and the permission preflight says yes; until then the fallbacks are registered too
-//! (the tap keeps running, in case Fn still gets through). A poller re-checks the permission every
-//! two seconds and starts a fresh tap when it changes.
+//! macOS creates a listen-only tap even without Input Monitoring and then filters what it gets
+//! (flags-changed events such as Fn alone still arrive, key presses do not), so a running tap does
+//! not prove the permission. The Fn shortcuts count as working when the tap runs and either the
+//! preflight says yes or a key press reached the tap (the preflight can stay "no" until relaunch);
+//! until then the fallbacks are registered too. A poller re-checks every two seconds.
+//!
+//! Prompts: nothing here asks macOS for a permission. Creating the tap and the preflight are
+//! silent checks (tccd logs them as `preflight=yes`); only `input_monitoring_request`, on a click,
+//! calls `CGRequestListenEventAccess`, and only once per process.
 
 use std::collections::BTreeSet;
 use std::str::FromStr;
@@ -19,7 +23,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use comma_input::{Action, FnBinding, FnBindings, FnTap, Hint, Input, Machine, MatcherOutput, Mode as KeyMode};
+use comma_input::{Action, FnBinding, FnBindings, FnTap, Hint, Input, Machine, MatcherOutput, Mode as KeyMode, TapMode};
 use comma_voice::prompts::Mode;
 use serde::Serialize;
 use serde_json::json;
@@ -123,12 +127,26 @@ pub struct ShortcutsStatus {
     pub tap_error: Option<String>,
     /// Some keyboard event reached the tap since it started.
     pub tap_delivered: bool,
+    /// A key press reached the tap: Input Monitoring is in effect for this process.
+    pub tap_keys: bool,
+    /// The user asked for Input Monitoring in this process; asking again would not prompt.
+    pub requested: bool,
+    /// The active tap that swallows Fn (experimental): `off`, `on`, or `unavailable` (no Accessibility).
+    pub swallow: SwallowStatus,
     /// `CGPreflightListenEventAccess` as this process sees it.
     pub input_monitoring: bool,
     /// The permission is there but the tap cannot start: macOS applies it after a restart.
     pub restart_required: bool,
     /// Everything registered now, Fn bindings on the tap and plugin shortcuts.
     pub registered: Vec<Registered>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwallowStatus {
+    Off,
+    On,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -141,16 +159,36 @@ pub enum GlobeKey {
     Unknown,
 }
 
-/// Reads `AppleFnUsageType` (0 do nothing, 1 change input source, 2 emoji, 3 dictation).
+fn read_hitoolbox(key: &str) -> Option<String> {
+    let out = std::process::Command::new("/usr/bin/defaults").args(["read", "com.apple.HIToolbox", key]).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// `AppleFnUsageType` (0 do nothing, 1 change input source, 2 emoji, 3 dictation). Read-only:
+/// Comma never changes it. When the key was never written, macOS uses its default, which
+/// `default_globe_key` works out from the enabled input sources.
 pub fn globe_key() -> GlobeKey {
-    let out = std::process::Command::new("/usr/bin/defaults").args(["read", "com.apple.HIToolbox", "AppleFnUsageType"]).output();
-    match out.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).as_deref() {
+    match read_hitoolbox("AppleFnUsageType").as_deref() {
         Some("0") => GlobeKey::None,
         Some("1") => GlobeKey::InputSource,
         Some("2") => GlobeKey::Emoji,
         Some("3") => GlobeKey::Dictation,
-        _ => GlobeKey::Unknown,
+        Some(_) => GlobeKey::Unknown,
+        None => read_hitoolbox("AppleEnabledInputSources").map_or(GlobeKey::Unknown, |s| default_globe_key(&s)),
     }
+}
+
+/// The macOS default for "Press Globe key to": Change Input Source with more than one keyboard
+/// layout or input mode enabled, else Show Emoji & Symbols. `sources` is `defaults read` output.
+pub fn default_globe_key(sources: &str) -> GlobeKey {
+    let typing = sources
+        .lines()
+        .filter(|l| {
+            let l = l.replace(' ', "");
+            l.contains("InputSourceKind=\"KeyboardLayout\"") || l.contains("InputSourceKind=\"InputMode\"")
+        })
+        .count();
+    if typing > 1 { GlobeKey::InputSource } else { GlobeKey::Emoji }
 }
 
 /// Which accelerator each mode uses given whether the Fn shortcuts can be trusted. Pure, for tests.
@@ -195,10 +233,11 @@ pub fn want_tap(any_fn: bool, granted: bool, probe: bool) -> bool {
     any_fn && (granted || probe)
 }
 
-/// The Fn shortcuts work only with a running tap and the permission; a tap macOS created without
-/// it may receive nothing at all.
-pub fn fn_trusted(tap_running: bool, granted: bool) -> bool {
-    tap_running && granted
+/// The Fn shortcuts work only with a running tap and the permission in effect: the preflight, or
+/// a key press that reached the tap (macOS delivers those only with the permission, and the
+/// preflight can stay "no" until relaunch). A tap created without it gets Fn alone at most.
+pub fn fn_trusted(tap_running: bool, granted: bool, keys_delivered: bool) -> bool {
+    tap_running && (granted || keys_delivered)
 }
 
 pub fn listener_for(any_fn: bool, trusted: bool) -> Listener {
@@ -233,6 +272,8 @@ struct Registration {
     escape_registered: bool,
     /// `fn_trusted` at the last reconfigure: the tap also gets Esc then.
     trusted: bool,
+    /// The last active tap could not start (no Accessibility).
+    swallow_failed: bool,
     status: ShortcutsStatus,
     configured: ShortcutSettings,
 }
@@ -246,6 +287,10 @@ pub struct Shortcuts {
     probe: Arc<AtomicBool>,
     /// The shortcut recorder is open: nothing is registered or matched, so the keys reach it.
     suspended: Arc<AtomicBool>,
+    /// `CGRequestListenEventAccess` was called in this process.
+    requested: Arc<AtomicBool>,
+    /// Use the active tap that swallows Fn (experimental, off by default).
+    swallow: Arc<AtomicBool>,
 }
 
 /// Called with each action after its event is emitted, on the dispatcher thread.
@@ -281,6 +326,9 @@ fn empty_status() -> ShortcutsStatus {
         tap: TapStatus::Off,
         tap_error: None,
         tap_delivered: false,
+        tap_keys: false,
+        requested: false,
+        swallow: SwallowStatus::Off,
         input_monitoring: false,
         restart_required: false,
         registered: Vec::new(),
@@ -290,7 +338,8 @@ fn empty_status() -> ShortcutsStatus {
 /// One line for the log when the listener changes. Names only configured shortcuts.
 pub fn describe(s: &ShortcutsStatus) -> String {
     let tap = match s.tap {
-        TapStatus::Running if s.tap_delivered => "running, delivering".to_owned(),
+        TapStatus::Running if s.tap_keys => "running, delivering key presses".to_owned(),
+        TapStatus::Running if s.tap_delivered => "running, delivering (modifiers only so far)".to_owned(),
         TapStatus::Running => "running, nothing delivered yet".to_owned(),
         TapStatus::Off => "off".to_owned(),
         TapStatus::Failed => format!("failed ({})", s.tap_error.as_deref().unwrap_or("unknown")),
@@ -318,6 +367,7 @@ impl Shortcuts {
             plugin: Vec::new(),
             escape_registered: false,
             trusted: false,
+            swallow_failed: false,
             status: empty_status(),
             configured: configured.clone(),
         }));
@@ -327,6 +377,8 @@ impl Shortcuts {
             capture: Arc::new(Mutex::new(None)),
             probe: Arc::new(AtomicBool::new(probe)),
             suspended: Arc::new(AtomicBool::new(false)),
+            requested: Arc::new(AtomicBool::new(false)),
+            swallow: Arc::new(AtomicBool::new(false)),
         };
         me.reconfigure(app, &configured);
 
@@ -380,21 +432,53 @@ impl Shortcuts {
         }
     }
 
-    /// Picks up the tap's first delivered event.
+    /// Picks up the tap's first delivered event, and its first key press (which proves the
+    /// permission and switches from the fallbacks to the Fn shortcuts).
     fn refresh_delivered(&self, app: &AppHandle) {
-        let changed = {
+        let (changed, keys_now) = {
             let Ok(mut reg) = self.reg.lock() else { return };
             let delivered = reg.tap.as_ref().is_some_and(FnTap::delivered);
-            if delivered == reg.status.tap_delivered {
-                None
+            let keys = reg.tap.as_ref().is_some_and(FnTap::keys_delivered);
+            let keys_now = keys && !reg.status.tap_keys;
+            if delivered == reg.status.tap_delivered && !keys_now {
+                (None, false)
             } else {
                 reg.status.tap_delivered = delivered;
-                Some(reg.status.clone())
+                (Some(reg.status.clone()), keys_now)
             }
         };
-        if let Some(status) = changed {
+        if keys_now {
+            log::info!("Fn listener: a key press arrived, so Input Monitoring is in effect");
+            let configured = self.reg.lock().map(|r| r.configured.clone()).ok();
+            if let Some(configured) = configured {
+                self.reconfigure(app, &configured);
+            }
+        } else if let Some(status) = changed {
             log::info!("Fn listener: {}", describe(&status));
             emit_status(app, &status);
+        }
+    }
+
+    /// Input Monitoring is in effect for this process (preflight, or a key press reached the tap).
+    pub fn input_monitoring_effective(&self) -> bool {
+        // An active tap (Swallow Fn) runs on Accessibility and gets keys either way: no proof there.
+        comma_input::input_monitoring_granted()
+            || self.reg.lock().is_ok_and(|r| r.tap.as_ref().is_some_and(|t| t.mode() == TapMode::ListenOnly && t.keys_delivered()))
+    }
+
+    /// Whether `CGRequestListenEventAccess` may run: once per process, on a click.
+    pub fn take_request(&self) -> bool {
+        !self.requested.swap(true, Ordering::Relaxed)
+    }
+
+    /// Turns the experimental Fn-swallowing tap on or off and restarts the listener.
+    pub fn set_swallow(&self, app: &AppHandle, on: bool) {
+        if self.swallow.swap(on, Ordering::Relaxed) != on {
+            log::info!("Fn listener: swallowing Fn {}", if on { "on" } else { "off" });
+            if let Ok(mut reg) = self.reg.lock() {
+                reg.swallow_failed = false;
+            }
+            self.restart(app);
         }
     }
 
@@ -407,7 +491,7 @@ impl Shortcuts {
         self.probe.store(true, Ordering::Relaxed);
     }
 
-    /// Whether the Fn shortcuts work (tap running and permission allowed).
+    /// Whether the Fn shortcuts work (tap running and permission in effect).
     pub fn fn_trusted(&self) -> bool {
         self.reg.lock().map(|r| r.trusted).unwrap_or(false)
     }
@@ -480,10 +564,18 @@ impl Shortcuts {
         let any_fn = any_fn(configured);
         let suspended = self.suspended.load(Ordering::Relaxed);
         let probe = self.probe.load(Ordering::Relaxed);
+        let want_swallow = self.swallow.load(Ordering::Relaxed);
         let (before, after) = {
             let Ok(mut reg) = self.reg.lock() else { return };
             let before = reg.status.clone();
             reg.configured = configured.clone();
+            // The wanted tap kind changed: start over with the other one.
+            let mode = if want_swallow && !reg.swallow_failed { TapMode::Swallow } else { TapMode::ListenOnly };
+            if reg.tap.as_ref().is_some_and(|t| t.mode() != mode)
+                && let Some(tap) = reg.tap.take()
+            {
+                tap.stop();
+            }
 
             // The tap always gets the Fn bindings: when Fn gets through without the permission, it works.
             let tap_bindings = if suspended { FnBindings::default() } else { plan(configured, true).0 };
@@ -491,15 +583,26 @@ impl Shortcuts {
                 if let Some(tap) = &reg.tap {
                     tap.set_bindings(tap_bindings);
                 } else {
-                    let tx = self.tx.clone();
-                    match FnTap::start(tap_bindings, move |out: MatcherOutput| {
-                        if !out.inputs.is_empty() {
-                            let _ = tx.send(Msg::Inputs(out.inputs, Source::Fn));
-                        }
-                        if let Some(held) = out.held {
-                            let _ = tx.send(Msg::Held(held));
-                        }
-                    }) {
+                    let start = |mode: TapMode| {
+                        let tx = self.tx.clone();
+                        FnTap::start(tap_bindings, mode, move |out: MatcherOutput| {
+                            if !out.inputs.is_empty() {
+                                let _ = tx.send(Msg::Inputs(out.inputs, Source::Fn));
+                            }
+                            if let Some(held) = out.held {
+                                let _ = tx.send(Msg::Held(held));
+                            }
+                        })
+                    };
+                    let mut started = start(mode);
+                    if mode == TapMode::Swallow
+                        && let Err(e) = &started
+                    {
+                        log::warn!("Fn listener: cannot swallow Fn ({e}); listening only");
+                        reg.swallow_failed = true;
+                        started = start(TapMode::ListenOnly);
+                    }
+                    match started {
                         Ok(tap) => {
                             reg.tap = Some(tap);
                             reg.tap_error = None;
@@ -512,7 +615,8 @@ impl Shortcuts {
             }
 
             let tap_running = reg.tap.is_some();
-            let trusted = fn_trusted(tap_running, granted);
+            let keys = reg.tap.as_ref().is_some_and(FnTap::keys_delivered);
+            let trusted = fn_trusted(tap_running, granted, keys);
             reg.trusted = trusted;
             let (_, plugin) = plan(configured, trusted);
             let gs = app.global_shortcut();
@@ -564,6 +668,13 @@ impl Shortcuts {
                 tap,
                 tap_error: reg.tap_error.clone(),
                 tap_delivered: reg.tap.as_ref().is_some_and(FnTap::delivered),
+                tap_keys: keys,
+                requested: self.requested.load(Ordering::Relaxed),
+                swallow: match reg.tap.as_ref().map(FnTap::mode) {
+                    Some(TapMode::Swallow) => SwallowStatus::On,
+                    _ if want_swallow && reg.swallow_failed => SwallowStatus::Unavailable,
+                    _ => SwallowStatus::Off,
+                },
                 input_monitoring: granted,
                 restart_required: restart_required(any_fn, granted, tap),
                 registered,
@@ -625,6 +736,9 @@ impl Shortcuts {
                 },
             };
             let now = Instant::now();
+            // A Cancel out of the double-press wait is a tap too short to hold speech: the bar goes
+            // away quietly (no cancel sound, no shake) and nothing runs.
+            let was_waiting = machine.deadline().is_some();
             let actions = match msg {
                 None => machine.tick(now),
                 Some(Msg::Held(held)) => {
@@ -662,7 +776,8 @@ impl Shortcuts {
                 if matches!(action, Action::Start(_)) {
                     target = self.target(app);
                 }
-                emit_action(app, action, target, source);
+                let quiet = was_waiting && matches!(action, Action::Cancel(_));
+                emit_action(app, action, target, source, quiet);
                 hook(app, action, target);
             }
             let want = machine.is_recording() || busy || card;
@@ -684,7 +799,7 @@ fn emit_status<R: Runtime>(app: &AppHandle<R>, status: &ShortcutsStatus) {
 }
 
 /// The `shortcut://action` payload: what the state machine decided, for the devtool and the key test.
-pub fn action_payload(action: &Action, target: Target, source: Source) -> Option<serde_json::Value> {
+pub fn action_payload(action: &Action, target: Target, source: Source, quiet: bool) -> Option<serde_json::Value> {
     let (name, mode, hands_free) = match action {
         Action::Start(m) => ("start", *m, None),
         Action::Switch { mode, hands_free } => ("switch", *mode, Some(*hands_free)),
@@ -696,11 +811,14 @@ pub fn action_payload(action: &Action, target: Target, source: Source) -> Option
     if let Some(h) = hands_free {
         payload["hands_free"] = json!(h);
     }
+    if quiet {
+        payload["quiet"] = json!(true);
+    }
     Some(payload)
 }
 
-fn emit_action<R: Runtime>(app: &AppHandle<R>, action: &Action, target: Target, source: Source) {
-    if let Some(payload) = action_payload(action, target, source) {
+fn emit_action<R: Runtime>(app: &AppHandle<R>, action: &Action, target: Target, source: Source, quiet: bool) {
+    if let Some(payload) = action_payload(action, target, source, quiet) {
         log::info!("shortcut: {} {} via {} to {}", payload["action"], payload["mode"], payload["source"], payload["target"]);
         let _ = app.emit("shortcut://action", payload);
     }
@@ -708,6 +826,7 @@ fn emit_action<R: Runtime>(app: &AppHandle<R>, action: &Action, target: Target, 
         Action::Start(m) => ("shortcut://down", json!({ "mode": run_mode(*m) })),
         Action::Switch { mode, hands_free } => ("shortcut://switch", json!({ "mode": run_mode(*mode), "hands_free": hands_free })),
         Action::Stop(m) => ("shortcut://up", json!({ "mode": run_mode(*m) })),
+        Action::Cancel(m) if quiet => ("shortcut://cancel", json!({ "mode": run_mode(*m), "quiet": true })),
         Action::Cancel(m) => ("shortcut://cancel", json!({ "mode": run_mode(*m) })),
         Action::Hint(Hint::AskHold) => return,
     };
@@ -757,14 +876,15 @@ mod tests {
     /// that as the permission, reported `fn`, registered no fallback and showed no hint.
     #[test]
     fn a_tap_without_the_permission_is_not_trusted() {
-        assert!(!fn_trusted(true, false), "running tap, preflight no");
-        assert!(fn_trusted(true, true));
-        assert!(!fn_trusted(false, true));
-        assert_eq!(listener_for(true, fn_trusted(true, false)), Listener::Fallback);
+        assert!(!fn_trusted(true, false, false), "running tap, preflight no, only Fn arrives");
+        assert!(fn_trusted(true, true, false));
+        assert!(fn_trusted(true, false, true), "a key press arrived: allowed, the preflight is stale");
+        assert!(!fn_trusted(false, true, true));
+        assert_eq!(listener_for(true, fn_trusted(true, false, false)), Listener::Fallback);
         assert_eq!(listener_for(true, true), Listener::Fn);
         assert_eq!(listener_for(false, false), Listener::Fn, "nothing needs the tap");
         // Untrusted means the fallbacks are registered next to the tap.
-        let (_, plugin) = plan(&ShortcutSettings::default(), fn_trusted(true, false));
+        let (_, plugin) = plan(&ShortcutSettings::default(), fn_trusted(true, false, false));
         assert_eq!(plugin.len(), 3);
     }
 
@@ -793,6 +913,7 @@ mod tests {
         assert_eq!(v["listener"], "fallback");
         assert_eq!(v["tap"], "running");
         assert_eq!(v["tap_error"], serde_json::Value::Null);
+        assert_eq!((v["tap_keys"].clone(), v["requested"].clone(), v["swallow"].clone()), (json!(false), json!(false), json!("off")));
         assert_eq!(v["registered"][0], json!({ "mode": "dictate", "shortcut": "Fn", "via": "fn" }));
         assert_eq!(serde_json::to_value(Target::Hub).unwrap(), "hub");
     }
@@ -810,10 +931,26 @@ mod tests {
     }
 
     #[test]
+    fn an_unset_globe_key_follows_the_macos_default() {
+        let two = r#"(
+            { InputSourceKind = "Keyboard Layout"; "KeyboardLayout ID" = 252; "KeyboardLayout Name" = ABC; },
+            { "Bundle ID" = "com.apple.inputmethod.SCIM"; "Input Mode" = "com.apple.inputmethod.SCIM.ITABC"; InputSourceKind = "Input Mode"; },
+            { "Bundle ID" = "com.apple.inputmethod.SCIM"; InputSourceKind = "Keyboard Input Method"; },
+            { "Bundle ID" = "com.apple.CharacterPaletteIM"; InputSourceKind = "Non Keyboard Input Method"; }
+        )"#
+        .replace("; ", ";\n");
+        assert_eq!(default_globe_key(&two), GlobeKey::InputSource, "ABC plus Pinyin: Fn switches the input source");
+        let one = "(\n{\nInputSourceKind = \"Keyboard Layout\";\n\"KeyboardLayout Name\" = ABC;\n},\n{\nInputSourceKind = \"Non Keyboard Input Method\";\n}\n)";
+        assert_eq!(default_globe_key(one), GlobeKey::Emoji);
+    }
+
+    #[test]
     fn action_payloads() {
-        let p = action_payload(&Action::Switch { mode: KeyMode::Ask, hands_free: false }, Target::Bar, Source::Fn).unwrap();
+        let p = action_payload(&Action::Switch { mode: KeyMode::Ask, hands_free: false }, Target::Bar, Source::Fn, false).unwrap();
         assert_eq!(p, json!({ "action": "switch", "mode": "ask", "source": "fn", "target": "bar", "hands_free": false }));
-        let p = action_payload(&Action::Start(KeyMode::Dictate), Target::Hub, Source::Plugin).unwrap();
+        let p = action_payload(&Action::Cancel(KeyMode::Dictate), Target::Bar, Source::Fn, true).unwrap();
+        assert_eq!(p["quiet"], true, "a tap under the hold threshold");
+        let p = action_payload(&Action::Start(KeyMode::Dictate), Target::Hub, Source::Plugin, false).unwrap();
         assert_eq!(p, json!({ "action": "start", "mode": "dictate", "source": "plugin", "target": "hub" }));
     }
 }

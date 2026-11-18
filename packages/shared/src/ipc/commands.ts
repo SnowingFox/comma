@@ -270,7 +270,10 @@ export const commands = {
   /** This week's Comma credits; fails when signed out. */
   account_credits: { args: NoArgs, result: Credits },
 
-  /** Asks macOS for Input Monitoring (adds Comma to the list and shows the prompt once). Resolves with whether it is allowed. */
+  /**
+   * On a click only: asks macOS for Input Monitoring (the prompt can show once per process; later calls only re-check).
+   * Resolves with whether it is in effect.
+   */
   input_monitoring_request: { args: NoArgs, result: z.boolean() },
   shortcuts_status: { args: NoArgs, result: ShortcutsStatus },
   /**
@@ -280,8 +283,10 @@ export const commands = {
   shortcuts_capture: { args: z.object({ owner: z.enum(["onboarding", "hub"]).nullable() }).strict(), result: Unit },
   /** Stops the Fn tap and the ordinary shortcuts and registers everything again. */
   shortcuts_restart: { args: NoArgs, result: ShortcutsStatus },
-  /** Re-checks Input Monitoring and tries the Fn tap even when the preflight says no. */
+  /** Re-checks Input Monitoring and tries the Fn tap even when the preflight says no. Never prompts. */
   shortcuts_probe: { args: NoArgs, result: ShortcutsStatus },
+  /** Experimental: an active tap that swallows Fn so macOS's Globe key action does not run (needs Accessibility). */
+  shortcuts_set_swallow: { args: z.object({ on: z.boolean() }).strict(), result: ShortcutsStatus },
   /** While the shortcut recorder is open: nothing is registered or matched, so its keys reach the window. */
   shortcuts_suspend: { args: z.object({ suspended: z.boolean() }).strict(), result: Unit },
 

@@ -51,6 +51,8 @@ pub enum HintKind {
     Accessibility,
     MicrophoneDenied,
     SignedOut,
+    /// Input Monitoring was allowed (or asked for) but only a relaunch applies it.
+    Relaunch,
 }
 
 impl HintKind {
@@ -64,6 +66,7 @@ impl HintKind {
             HintKind::Accessibility => "accessibility",
             HintKind::MicrophoneDenied => "microphone_denied",
             HintKind::SignedOut => "signed_out",
+            HintKind::Relaunch => "relaunch",
         }
     }
 
@@ -241,6 +244,20 @@ fn capture(state: &AppState, mode: Mode) -> Captured {
     }
 }
 
+/// The Input Monitoring hint shows once per launch: Fn alone works without it, so it must not
+/// interrupt every dictation, and its button must not prompt again and again.
+static INPUT_MONITORING_HINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Which Input Monitoring hint fits: none when the Fn shortcuts work; Relaunch once it was asked
+/// for or allowed in this process (asking again would not help); otherwise the Allow hint.
+pub fn input_monitoring_hint(trusted: bool, requested: bool, preflight: bool) -> Option<HintKind> {
+    match (trusted, requested || preflight) {
+        (true, _) => None,
+        (false, true) => Some(HintKind::Relaunch),
+        (false, false) => Some(HintKind::InputMonitoring),
+    }
+}
+
 /// Problems the user can fix, shown as the recording starts.
 fn start_hints(app: &AppHandle, state: &AppState) {
     let Ok(s) = state.snapshot() else { return };
@@ -249,10 +266,12 @@ fn start_hints(app: &AppHandle, state: &AppState) {
     } else if !comma_input::context::accessibility_trusted() {
         emit_hint(app, HintKind::Accessibility);
     } else if let Some(shortcuts) = app.try_state::<Shortcuts>()
-        && !shortcuts.fn_trusted()
         && [&s.shortcuts.dictate, &s.shortcuts.ask, &s.shortcuts.translate].iter().any(|a| a.starts_with("Fn"))
+        && let Ok(status) = shortcuts.status()
+        && let Some(kind) = input_monitoring_hint(shortcuts.fn_trusted(), status.requested, status.input_monitoring)
+        && !INPUT_MONITORING_HINTED.swap(true, std::sync::atomic::Ordering::Relaxed)
     {
-        emit_hint(app, HintKind::InputMonitoring);
+        emit_hint(app, kind);
     }
 }
 
@@ -509,10 +528,10 @@ pub async fn pipeline_run(app: &AppHandle, state: &AppState, args: RunArgs) -> A
     match &result {
         Ok(done) => {
             log::info!(
-                "run {id}: ok in {} ms (stt {} ms, llm first token {:?} ms, llm {} ms), {:.1} s audio, output {}",
+                "run {id}: ok in {} ms (stt {} ms, llm first token {} ms, llm {} ms), {:.1} s audio, output {}",
                 done.total_ms,
                 done.stt_ms,
-                done.llm_ttft_ms,
+                done.llm_ttft_ms.map_or("-".to_owned(), |t| t.to_string()),
                 done.llm_total_ms,
                 done.audio_secs,
                 done.output.as_str()
@@ -1046,6 +1065,15 @@ mod tests {
         let runs = state.db.list_runs(&db::RunsQuery::default()).unwrap();
         assert_eq!(runs.len(), 1);
         assert!(!runs[0].ok && runs[0].error.as_deref().is_some_and(|e| e.contains("ElevenLabs key")));
+    }
+
+    #[test]
+    fn input_monitoring_hint_never_asks_twice() {
+        assert_eq!(input_monitoring_hint(true, true, true), None);
+        assert_eq!(input_monitoring_hint(false, false, false), Some(HintKind::InputMonitoring));
+        assert_eq!(input_monitoring_hint(false, true, false), Some(HintKind::Relaunch), "asked already: relaunch, not another prompt");
+        assert_eq!(input_monitoring_hint(false, false, true), Some(HintKind::Relaunch), "allowed but not in effect");
+        assert_eq!(serde_json::to_value(HintKind::Relaunch).unwrap(), "relaunch");
     }
 
     #[test]

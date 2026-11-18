@@ -162,21 +162,42 @@ pub async fn secret_status(state: State<'_, AppState>) -> AppResult<SecretStatus
     secrets::status(state.secrets.as_ref())
 }
 
-/// The preflight answers only. A running Fn tap is no proof: macOS creates one without the
-/// permission and then delivers little or nothing to it.
+/// Input Monitoring is granted when the preflight says so or a key press reached the Fn tap (the
+/// preflight can stay "no" until relaunch). A running tap alone is no proof: macOS creates one
+/// without the permission and then passes it modifier changes only.
 #[tauri::command]
-pub fn permissions_status() -> PermissionsStatus {
-    permissions::status()
+pub fn permissions_status(app: AppHandle) -> PermissionsStatus {
+    let mut status = permissions::status();
+    if app.try_state::<Shortcuts>().is_some_and(|s| s.input_monitoring_effective()) {
+        status.input_monitoring = permissions::PermissionState::Granted;
+    }
+    status
 }
 
+/// On a click only. The system prompt can show once per process; later clicks just re-check (the
+/// frontend then opens System Settings, and offers a relaunch).
 #[tauri::command]
 pub fn input_monitoring_request(app: AppHandle) -> bool {
-    let granted = comma_input::request_input_monitoring();
-    log::info!("Input Monitoring requested: {}", if granted { "allowed" } else { "not allowed yet" });
-    if let Some(shortcuts) = app.try_state::<Shortcuts>() {
-        shortcuts.probe(&app);
-    }
-    granted
+    let Some(shortcuts) = app.try_state::<Shortcuts>() else { return comma_input::input_monitoring_granted() };
+    let granted = if shortcuts.take_request() {
+        let granted = comma_input::request_input_monitoring();
+        log::info!("Input Monitoring requested: {}", if granted { "allowed" } else { "not allowed yet" });
+        granted
+    } else {
+        log::info!("Input Monitoring asked again: not prompting a second time in this process");
+        comma_input::input_monitoring_granted()
+    };
+    shortcuts.probe(&app);
+    granted || shortcuts.input_monitoring_effective()
+}
+
+/// Experimental: an active tap that swallows Fn so the Globe key action does not run (needs
+/// Accessibility). Off by default; the devtool turns it on.
+#[tauri::command]
+pub fn shortcuts_set_swallow(app: AppHandle, on: bool) -> AppResult<ShortcutsStatus> {
+    let s = shortcuts(&app)?;
+    s.set_swallow(&app, on);
+    s.status()
 }
 
 /// Quits and relaunches Comma, for a permission macOS applies only to a new process.
@@ -1107,6 +1128,42 @@ mod tests {
         assert!(runs.iter().all(|r| r.ok && r.model.is_some()));
         assert!(events.lock().unwrap().iter().any(|e| e.contains("run://stage") && e.contains("\"llm\"")));
         println!("events: {}", events.lock().unwrap().len());
+    }
+
+    /// The app's pipeline with the real ElevenLabs (key from the environment, held only in the
+    /// in-memory store, never the Keychain) and the rewrite on magpie:
+    /// `ELEVENLABS_API_KEY=... COMMA_TEST_WAV=speech.wav cargo test -p comma real_elevenlabs_run -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "needs ELEVENLABS_API_KEY, a speech WAV and magpie"]
+    async fn real_elevenlabs_run() {
+        let key = std::env::var("ELEVENLABS_API_KEY").expect("ELEVENLABS_API_KEY");
+        let wav = std::fs::read(std::env::var("COMMA_TEST_WAV").expect("COMMA_TEST_WAV")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir);
+        let models = llm_models_impl(&state, None).await.unwrap();
+        let model = std::env::var("COMMA_TEST_MODEL").unwrap_or_else(|_| models[0].clone());
+        secrets::set_secret(state.secrets.as_ref(), SecretName::Elevenlabs, &key).unwrap();
+        state.update_settings(&json!({ "llm": { "model": model, "reasoning_effort": "off" } })).unwrap();
+        assert!(run::readiness(&state).is_ok());
+        let args = run::RunArgs {
+            mode: Mode::Dictate,
+            audio_base64: base64::engine::general_purpose::STANDARD.encode(&wav),
+            source: run::RunSource::Onboarding,
+            target_language: None,
+            selected_text: None,
+            record_ms: None,
+            audio_secs: None,
+        };
+        let stages = std::sync::Mutex::new(Vec::<String>::new());
+        let emit = |_: &str, event: &str, payload: Value| {
+            if event == "run://stage" {
+                stages.lock().unwrap().push(format!("{} {}", payload["stage"], payload["ms"]));
+            }
+        };
+        let out = run::run_inner(&emit, &state, &args, "real", "onboarding", comma_voice::CancellationToken::new(), std::time::Instant::now()).await.unwrap();
+        println!("stt {} ms, llm {} ms, total {} ms, stages {:?}\n  raw: {}\n  refined: {}", out.stt_ms, out.llm_total_ms, out.total_ms, stages.lock().unwrap(), out.raw_text, out.refined_text);
+        assert!(!out.refined_text.is_empty());
+        assert_eq!(state.db.list_runs(&db::RunsQuery::default()).unwrap().len(), 1);
     }
 
     /// Account mode: an expired access token is refused with 401, refreshed once, and the call is
