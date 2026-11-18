@@ -9,20 +9,26 @@ export const LanguageTag = z
 export const ContextLevel = z.enum(['off', 'app', 'app_and_selection'])
 export type ContextLevel = z.infer<typeof ContextLevel>
 
+/** Whose provider keys the desktop app uses: the user's own (Keychain) or Comma's credits through this server. */
+export const ProviderMode = z.enum(['own', 'comma'])
+export type ProviderMode = z.infer<typeof ProviderMode>
+
 /** Settings that follow the account across devices. */
 export const UserSettings = z.object({
   /** Preferred spoken languages, most preferred first. */
   languages: z.array(LanguageTag).max(10),
   /** Translate mode targets; the first one is used. */
   translate_targets: z.array(LanguageTag).max(3),
-  context_level: ContextLevel
+  context_level: ContextLevel,
+  provider_mode: ProviderMode
 })
 export type UserSettings = z.infer<typeof UserSettings>
 
 export const DEFAULT_USER_SETTINGS: UserSettings = {
   languages: [],
   translate_targets: [],
-  context_level: 'app_and_selection'
+  context_level: 'app_and_selection',
+  provider_mode: 'own'
 }
 
 export const Plan = z.enum(['free'])
