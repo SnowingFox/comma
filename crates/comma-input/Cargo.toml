@@ -1,0 +1,19 @@
+[package]
+name = "comma-input"
+description = "Comma's keyboard and output layer: the shortcut state machine, the Fn listener, paste with clipboard restore, and the focused app's context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray", "NSData", "NSEnumerator"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSPasteboard", "NSPasteboardItem", "NSWorkspace", "NSRunningApplication"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop", "CFMachPort", "CFString", "CFBase", "CFNumber", "CFDate"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventTypes", "CGEventSource", "CGRemoteOperation"] }

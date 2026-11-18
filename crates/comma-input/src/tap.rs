@@ -1,0 +1,277 @@
+//! The Fn listener: a listen-only `CGEventTap` on its own thread (needs Input Monitoring).
+//!
+//! It subscribes to flags-changed, key-down and key-up events, reads only the keycode, the
+//! autorepeat field and the modifier flags of each, and hands them to a [`Matcher`] that keeps
+//! only the configured keys (see the privacy rule in [`crate::binding`]). Being listen-only, it
+//! never blocks, changes or swallows an event.
+
+use crate::binding::{FnBindings, Matcher, MatcherOutput};
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TapError {
+    /// `CGEventTapCreate` returned null: Input Monitoring is not allowed.
+    #[error("Comma needs the Input Monitoring permission to use Fn shortcuts")]
+    NotPermitted,
+    #[error("the Fn listener could not start: {0}")]
+    Failed(String),
+}
+
+#[cfg(target_os = "macos")]
+pub use mac::{FnTap, input_monitoring_granted, request_input_monitoring};
+
+#[cfg(not(target_os = "macos"))]
+pub use stub::{FnTap, input_monitoring_granted, request_input_monitoring};
+
+/// What the tap callback shares with the owning [`FnTap`].
+struct Shared {
+    matcher: std::sync::Mutex<Matcher>,
+    listen_escape: std::sync::atomic::AtomicBool,
+    handler: Box<dyn Fn(MatcherOutput) + Send + Sync>,
+}
+
+impl Shared {
+    fn new(bindings: FnBindings, handler: Box<dyn Fn(MatcherOutput) + Send + Sync>) -> Self {
+        Self { matcher: std::sync::Mutex::new(Matcher::new(bindings)), listen_escape: Default::default(), handler }
+    }
+
+    fn set_bindings(&self, bindings: FnBindings) {
+        if let Ok(mut m) = self.matcher.lock() {
+            m.set_bindings(bindings);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::ffi::c_void;
+    use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::thread::JoinHandle;
+
+    use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopCommonModes, kCFRunLoopDefaultMode};
+    use objc2_core_graphics::{
+        CGEvent, CGEventField, CGEventMask, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy,
+        CGEventType, CGPreflightListenEventAccess, CGRequestListenEventAccess,
+    };
+
+    use super::{Shared, TapError};
+    use crate::binding::{FnBindings, MatcherOutput, RawEvent};
+
+    /// CGPreflightListenEventAccess: whether Input Monitoring is allowed. Does not prompt.
+    pub fn input_monitoring_granted() -> bool {
+        CGPreflightListenEventAccess()
+    }
+
+    /// CGRequestListenEventAccess: adds Comma to the Input Monitoring list and shows the system
+    /// prompt the first time. Returns whether it is allowed now.
+    pub fn request_input_monitoring() -> bool {
+        CGRequestListenEventAccess()
+    }
+
+    struct TapState {
+        shared: Shared,
+        /// The tap's mach port, to re-enable it when macOS disables it. Null until created.
+        port: AtomicPtr<CFMachPort>,
+        stop: AtomicBool,
+    }
+
+    pub struct FnTap {
+        state: Arc<TapState>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl std::fmt::Debug for FnTap {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("FnTap").field("running", &self.thread.is_some()).finish()
+        }
+    }
+
+    impl FnTap {
+        /// Starts the listener. `handler` runs on the tap thread for every non-empty output; keep
+        /// it short (forward to a channel), since macOS disables a tap that stalls.
+        pub fn start(bindings: FnBindings, handler: impl Fn(MatcherOutput) + Send + Sync + 'static) -> Result<FnTap, TapError> {
+            let state = Arc::new(TapState {
+                shared: Shared::new(bindings, Box::new(handler)),
+                port: AtomicPtr::new(std::ptr::null_mut()),
+                stop: AtomicBool::new(false),
+            });
+            let (tx, rx) = mpsc::channel::<Result<(), TapError>>();
+            let thread_state = Arc::clone(&state);
+            let thread = std::thread::Builder::new()
+                .name("comma-fn-tap".into())
+                .spawn(move || run(thread_state, tx))
+                .map_err(|e| TapError::Failed(e.to_string()))?;
+            match rx.recv() {
+                Ok(Ok(())) => Ok(FnTap { state, thread: Some(thread) }),
+                Ok(Err(e)) => {
+                    let _ = thread.join();
+                    Err(e)
+                }
+                Err(_) => Err(TapError::Failed("the listener thread ended".into())),
+            }
+        }
+
+        pub fn set_bindings(&self, bindings: FnBindings) {
+            self.state.shared.set_bindings(bindings);
+        }
+
+        /// Esc is matched only while this is on (during a recording, or with the answer card open).
+        pub fn set_listen_escape(&self, on: bool) {
+            self.state.shared.listen_escape.store(on, Ordering::Relaxed);
+        }
+
+        pub fn stop(mut self) {
+            self.shutdown();
+        }
+
+        fn shutdown(&mut self) {
+            self.state.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    impl Drop for FnTap {
+        fn drop(&mut self) {
+            self.shutdown();
+        }
+    }
+
+    fn run(state: Arc<TapState>, ready: mpsc::Sender<Result<(), TapError>>) {
+        let mask: CGEventMask =
+            (1 << CGEventType::KeyDown.0) | (1 << CGEventType::KeyUp.0) | (1 << CGEventType::FlagsChanged.0);
+        let user_info = Arc::as_ptr(&state) as *mut c_void;
+        // SAFETY: `callback` matches CGEventTapCallBack and only reads `user_info` as the
+        // `TapState` this thread keeps alive (its Arc) until the tap is invalidated below.
+        let port = unsafe {
+            CGEvent::tap_create(
+                CGEventTapLocation::SessionEventTap,
+                CGEventTapPlacement::HeadInsertEventTap,
+                CGEventTapOptions::ListenOnly,
+                mask,
+                Some(callback),
+                user_info,
+            )
+        };
+        let Some(port) = port else {
+            let _ = ready.send(Err(TapError::NotPermitted));
+            return;
+        };
+        let Some(source) = CFMachPort::new_run_loop_source(None, Some(&port), 0) else {
+            port.invalidate();
+            let _ = ready.send(Err(TapError::Failed("no run loop source".into())));
+            return;
+        };
+        let Some(run_loop) = CFRunLoop::current() else {
+            port.invalidate();
+            let _ = ready.send(Err(TapError::Failed("no run loop".into())));
+            return;
+        };
+        state.port.store(CFRetained::as_ptr(&port).as_ptr(), Ordering::Release);
+        // SAFETY: kCFRunLoopCommonModes is an immutable framework constant.
+        run_loop.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
+        CGEvent::tap_enable(&port, true);
+        let _ = ready.send(Ok(()));
+
+        while !state.stop.load(Ordering::Relaxed) {
+            // SAFETY: kCFRunLoopDefaultMode is an immutable framework constant.
+            CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.25, false);
+        }
+
+        CGEvent::tap_enable(&port, false);
+        // SAFETY: as above.
+        run_loop.remove_source(Some(&source), unsafe { kCFRunLoopCommonModes });
+        state.port.store(std::ptr::null_mut(), Ordering::Release);
+        port.invalidate();
+    }
+
+    unsafe extern "C-unwind" fn callback(
+        _proxy: CGEventTapProxy,
+        ty: CGEventType,
+        event: NonNull<CGEvent>,
+        user_info: *mut c_void,
+    ) -> *mut CGEvent {
+        // SAFETY: `user_info` is the `TapState` set in `run`, alive while the tap exists.
+        let state = unsafe { &*(user_info as *const TapState) };
+        // A panic must not unwind into CoreGraphics.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if ty == CGEventType::TapDisabledByTimeout || ty == CGEventType::TapDisabledByUserInput {
+                let port = state.port.load(Ordering::Acquire);
+                // SAFETY: non-null only while `run` holds the retained port.
+                if let Some(port) = unsafe { port.as_ref() } {
+                    CGEvent::tap_enable(port, true);
+                }
+                return;
+            }
+            // SAFETY: CoreGraphics passes a valid event for the duration of the callback.
+            let ev = unsafe { event.as_ref() };
+            let keycode = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventKeycode) as u16;
+            let raw = match ty {
+                CGEventType::FlagsChanged => RawEvent::FlagsChanged { keycode, flags: CGEvent::flags(Some(ev)).0 },
+                CGEventType::KeyDown => RawEvent::KeyDown {
+                    keycode,
+                    repeat: CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventAutorepeat) != 0,
+                },
+                CGEventType::KeyUp => RawEvent::KeyUp { keycode },
+                _ => return,
+            };
+            let listen_escape = state.shared.listen_escape.load(Ordering::Relaxed);
+            let out = match state.shared.matcher.lock() {
+                Ok(mut m) => m.feed(raw, listen_escape),
+                Err(_) => return,
+            };
+            if !out.is_empty() {
+                (state.shared.handler)(out);
+            }
+        }));
+        // Listen-only: the event passes through untouched.
+        event.as_ptr()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        #[ignore = "reads the Input Monitoring state; run with --ignored"]
+        fn real_input_monitoring_state() {
+            let granted = input_monitoring_granted();
+            println!("input monitoring granted: {granted}");
+            // Starting the tap agrees with the preflight answer.
+            let tap = FnTap::start(FnBindings::default(), |_| {});
+            println!("tap start: {:?}", tap.as_ref().map(|_| ()));
+            if granted {
+                tap.unwrap().stop();
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod stub {
+    use super::{Shared, TapError};
+    use crate::binding::{FnBindings, MatcherOutput};
+
+    pub fn input_monitoring_granted() -> bool {
+        false
+    }
+
+    pub fn request_input_monitoring() -> bool {
+        false
+    }
+
+    #[derive(Debug)]
+    pub struct FnTap;
+
+    impl FnTap {
+        pub fn start(bindings: FnBindings, handler: impl Fn(MatcherOutput) + Send + Sync + 'static) -> Result<FnTap, TapError> {
+            let _ = Shared::new(bindings, Box::new(handler));
+            Err(TapError::Failed("only available on macOS".into()))
+        }
+        pub fn set_bindings(&self, _bindings: FnBindings) {}
+        pub fn set_listen_escape(&self, _on: bool) {}
+        pub fn stop(self) {}
+    }
+}
