@@ -4,26 +4,81 @@
   "version": "0.1.0",
   "identifier": "app.comma.desktop",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "bun run build",
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "comma-scaffold",
-        "width": 800,
-        "height": 600
+        "label": "hub",
+        "title": "Comma",
+        "url": "hub.html",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true,
+        "visible": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 16, "y": 20 }
+      },
+      {
+        "label": "onboarding",
+        "title": "Welcome to Comma",
+        "url": "onboarding.html",
+        "width": 960,
+        "height": 640,
+        "resizable": false,
+        "maximizable": false,
+        "center": true,
+        "visible": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 16, "y": 20 }
+      },
+      {
+        "label": "bar",
+        "title": "Comma bar",
+        "url": "bar.html",
+        "width": 360,
+        "height": 64,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "closable": false,
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "visibleOnAllWorkspaces": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "acceptFirstMouse": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost ws://localhost:1420"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg"],
+    "category": "Productivity",
+    "copyright": "Comma contributors. UI built with Multica UI, Copyright 2025-2026 Index Labs (Hong Kong) Limited.",
+    "resources": {
+      "../../../packages/multica-ui/LICENSE": "licenses/multica-ui/LICENSE",
+      "../../../packages/multica-ui/NOTICE": "licenses/multica-ui/NOTICE",
+      "../../../LICENSE": "licenses/comma/LICENSE"
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
