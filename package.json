@@ -1,0 +1,12 @@
+{
+  "name": "comma",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev:desktop": "bun --cwd apps/desktop tauri dev",
+    "dev:server": "bun --cwd apps/server start:dev",
+    "typecheck": "bun --filter '*' typecheck",
+    "test": "bun --filter '*' test"
+  }
+}
