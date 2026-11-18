@@ -2,7 +2,7 @@ import type { MockHandlers } from "./types";
 
 /** Shortcut, bar, pipeline and output commands. */
 export const RUNTIME_HANDLERS: MockHandlers = {
-  shortcuts_status: () => ({ listener: "fn", active: { dictate: "Fn", ask: "Fn+Space", translate: "Fn+ShiftLeft" }, errors: [] }),
+  shortcuts_status: () => ({ listener: "fn", active: { dictate: "Fn", ask: "Fn+Space", translate: "Fn+ShiftLeft" }, errors: [], globe_key: "none" }),
   shortcuts_capture: () => null,
   input_monitoring_request: () => true,
   bar_layout: () => null,

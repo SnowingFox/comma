@@ -89,6 +89,8 @@ export const FeedbackSettings = z.object({
   show_idle_bar: z.boolean(),
   /** The short teaching hints next to the bar. */
   hints: z.boolean(),
+  /** Lower the Mac's output volume while recording, so other audio stays out of the dictation. */
+  duck_audio: z.boolean(),
 });
 export type FeedbackSettings = z.infer<typeof FeedbackSettings>;
 
@@ -194,7 +196,7 @@ export const DEFAULT_SETTINGS: Settings = {
   shortcuts: DEFAULT_SHORTCUTS,
   account: { server_url: DEFAULT_SERVER_URL, email: "", name: "", access_expires_at: 0 },
   context_level: "app_and_selection",
-  feedback: { sounds: true, show_idle_bar: false, hints: true },
+  feedback: { sounds: true, show_idle_bar: false, hints: true, duck_audio: true },
   privacy: { keep_audio: false, history_days: 0 },
   audio: { microphone_id: "" },
   hint_counts: {},

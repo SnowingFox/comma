@@ -124,6 +124,11 @@ export const ShortcutsStatus = z.object({
   active: z.object({ dictate: z.string(), ask: z.string(), translate: z.string() }),
   /** Modes whose shortcut could not be registered (taken by another app), with the reason. */
   errors: z.array(z.object({ mode: RunMode, message: z.string() })),
+  /**
+   * System Settings > Keyboard > "Press Globe key to". Comma cannot stop that action, so anything but `none` also
+   * opens the emoji picker, switches input source or starts macOS dictation when Fn is pressed.
+   */
+  globe_key: z.enum(["none", "input_source", "emoji", "dictation", "unknown"]),
 });
 export type ShortcutsStatus = z.infer<typeof ShortcutsStatus>;
 
@@ -296,7 +301,9 @@ export const commands = {
     args: z
       .object({
         mode: RunMode,
-        wav_base64: z.string().min(1).max(36_000_000),
+        /** 16-bit mono WAV, or Ogg/Opus (then `audio_secs` is required), base64. */
+        audio_base64: z.string().min(1).max(36_000_000),
+        audio_secs: z.number().nonnegative().max(3600).optional(),
         source: RunSource,
         target_language: LanguageTag.optional(),
         selected_text: z.string().max(100_000).optional(),

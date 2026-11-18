@@ -4,7 +4,7 @@
 //! same keys the contract lists (`base_url`, not `baseUrl`).
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -15,9 +15,12 @@ use comma_voice::stt::{Audio, ElevenLabs, SpeechToText, SttOptions};
 use comma_voice::{CancellationToken, http, wav};
 use serde::Serialize;
 use serde_json::{Value, json};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::account::{self, Server};
+use crate::db::{self, Db};
+use crate::run::{self, HintKind, RunArgs, RunOutput, RunResult, Session};
+use crate::shortcuts::{Shortcuts, ShortcutsStatus};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::permissions::{self, PermissionsStatus, SettingsPaneKind};
 use crate::secrets::{self, ACCOUNT_ACCESS, ACCOUNT_REFRESH, SecretName, SecretStatus, SecretStore};
@@ -36,6 +39,11 @@ pub struct AppState {
     pub http: reqwest::Client,
     /// `comma_voice::stt::ELEVENLABS_BASE_URL`, replaced by a mock server in tests.
     pub elevenlabs_base_url: String,
+    pub db: Db,
+    pub session: Mutex<Session>,
+    /// Token refreshes never overlap.
+    pub refresh_lock: tokio::sync::Mutex<()>,
+    pub paste_lock: run::PasteLock,
 }
 
 fn ms(d: Duration) -> f64 {
@@ -43,13 +51,17 @@ fn ms(d: Duration) -> f64 {
 }
 
 impl AppState {
-    pub fn new(settings: Settings, settings_path: PathBuf, secrets: Box<dyn SecretStore>) -> Self {
+    pub fn new(settings: Settings, settings_path: PathBuf, secrets: Box<dyn SecretStore>, db: Db) -> Self {
         Self {
             settings: Mutex::new(settings),
             settings_path,
             secrets,
             http: http::client(),
             elevenlabs_base_url: comma_voice::stt::ELEVENLABS_BASE_URL.into(),
+            db,
+            session: Mutex::new(Session::default()),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            paste_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -57,7 +69,11 @@ impl AppState {
         self.settings.lock().map_err(|_| AppError::internal("settings lock poisoned"))
     }
 
-    fn snapshot(&self) -> AppResult<Settings> {
+    pub fn settings_guard(&self) -> AppResult<std::sync::MutexGuard<'_, Settings>> {
+        self.settings()
+    }
+
+    pub fn snapshot(&self) -> AppResult<Settings> {
         Ok(self.settings()?.clone())
     }
 
@@ -71,7 +87,7 @@ impl AppState {
 
     /// The LLM endpoint for `base_url`, or the saved one. magpie needs no key, so the stored key
     /// (which belongs to the custom endpoint) is only sent elsewhere.
-    fn llm_endpoint(&self, base_url: Option<String>) -> AppResult<OpenAiCompatible> {
+    pub fn llm_endpoint(&self, base_url: Option<String>) -> AppResult<OpenAiCompatible> {
         let base_url = match base_url.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty()) {
             Some(url) => url,
             None => self.settings()?.llm.base_url.clone(),
@@ -86,14 +102,14 @@ impl AppState {
     }
 
     /// ElevenLabs with the stored key and the saved model.
-    fn elevenlabs(&self) -> AppResult<ElevenLabs> {
+    pub fn elevenlabs(&self) -> AppResult<ElevenLabs> {
         let key = secrets::get_key(self.secrets.as_ref(), SecretName::Elevenlabs)?
             .ok_or_else(|| AppError::new(ErrorCode::NotConfigured, "Add your ElevenLabs API key first"))?;
         let model_id = self.settings()?.stt.model_id.clone();
         Ok(ElevenLabs::new(self.http.clone(), key, model_id).with_base_url(&self.elevenlabs_base_url))
     }
 
-    fn server_url(&self) -> AppResult<String> {
+    pub fn server_url(&self) -> AppResult<String> {
         Ok(self.settings()?.account.server_url.clone())
     }
 }
@@ -104,8 +120,35 @@ pub fn settings_get(state: State<'_, AppState>) -> AppResult<Settings> {
 }
 
 #[tauri::command]
-pub fn settings_set(state: State<'_, AppState>, patch: Value) -> AppResult<Settings> {
-    state.update_settings(&patch)
+pub fn settings_set(app: AppHandle, state: State<'_, AppState>, patch: Value) -> AppResult<Settings> {
+    let before = state.snapshot()?;
+    let next = state.update_settings(&patch)?;
+    after_settings_change(&app, &before, &next);
+    Ok(next)
+}
+
+/// Re-registers shortcuts, prunes history and tells the other windows.
+pub fn after_settings_change(app: &AppHandle, before: &Settings, next: &Settings) {
+    if before.shortcuts != next.shortcuts
+        && let Some(shortcuts) = app.try_state::<Shortcuts>()
+    {
+        shortcuts.reconfigure(app, &next.shortcuts);
+    }
+    if before.privacy.history_days != next.privacy.history_days
+        && let Some(state) = app.try_state::<AppState>()
+    {
+        let _ = state.db.prune(next.privacy.history_days, now_ms());
+        let _ = app.emit("history://changed", json!({}));
+    }
+    if before.feedback.show_idle_bar != next.feedback.show_idle_bar {
+        let layout = if next.feedback.show_idle_bar { windows::BarLayout::Dot } else { windows::BarLayout::Hidden };
+        let _ = windows::set_bar(app, layout, next.feedback.show_idle_bar);
+    }
+    let _ = app.emit("settings://changed", json!({}));
+}
+
+pub fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 
 // Keychain calls can block on a system prompt, so they run off the main thread.
@@ -120,8 +163,28 @@ pub async fn secret_status(state: State<'_, AppState>) -> AppResult<SecretStatus
 }
 
 #[tauri::command]
-pub fn permissions_status() -> PermissionsStatus {
-    permissions::status()
+pub fn permissions_status(app: AppHandle) -> PermissionsStatus {
+    let mut status = permissions::status();
+    // The preflight can say no while the tap works (it is the real answer).
+    if app.try_state::<Shortcuts>().is_some_and(|s| s.fn_running()) {
+        status.input_monitoring = permissions::PermissionState::Granted;
+    }
+    status
+}
+
+#[tauri::command]
+pub fn input_monitoring_request(app: AppHandle) -> bool {
+    let granted = comma_input::request_input_monitoring();
+    if let Some(shortcuts) = app.try_state::<Shortcuts>() {
+        shortcuts.enable_probe();
+        if let Some(state) = app.try_state::<AppState>()
+            && let Ok(s) = state.snapshot()
+        {
+            shortcuts.reconfigure(&app, &s.shortcuts);
+        }
+        return granted || shortcuts.fn_running();
+    }
+    granted
 }
 
 #[tauri::command]
@@ -337,7 +400,7 @@ pub struct AccountStatus {
     pub offline: bool,
 }
 
-fn now_secs() -> u64 {
+pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
@@ -413,7 +476,7 @@ pub async fn account_sign_in_impl(state: &AppState, email: &str, password: &str)
     account_status_impl(state).await
 }
 
-fn store_session(state: &AppState, tokens: &account::Tokens) -> AppResult<()> {
+pub fn store_session(state: &AppState, tokens: &account::Tokens) -> AppResult<()> {
     state.secrets.set(ACCOUNT_ACCESS, &tokens.access_token)?;
     state.secrets.set(ACCOUNT_REFRESH, &tokens.refresh_token)?;
     state.update_settings(&json!({
@@ -426,7 +489,7 @@ fn store_session(state: &AppState, tokens: &account::Tokens) -> AppResult<()> {
     Ok(())
 }
 
-fn clear_session(state: &AppState) -> AppResult<()> {
+pub fn clear_session(state: &AppState) -> AppResult<()> {
     state.secrets.delete(ACCOUNT_ACCESS)?;
     state.secrets.delete(ACCOUNT_REFRESH)?;
     state.update_settings(&json!({ "account": { "email": "", "name": "", "access_expires_at": 0 } }))?;
@@ -449,12 +512,21 @@ pub async fn account_status_impl(state: &AppState) -> AppResult<AccountStatus> {
         server_url: s.server_url.clone(),
         offline,
     };
-    let Some(refresh) = state.secrets.get(ACCOUNT_REFRESH)? else {
+    let Some(_) = state.secrets.get(ACCOUNT_REFRESH)? else {
         return Ok(status(false, false, &s));
     };
     if s.access_expires_at > now_secs() + 30 {
         return Ok(status(true, false, &s));
     }
+    let _lock = state.refresh_lock.lock().await;
+    // Another caller may have refreshed while this one waited.
+    let s = state.snapshot()?.account;
+    if s.access_expires_at > now_secs() + 30 {
+        return Ok(status(true, false, &s));
+    }
+    let Some(refresh) = state.secrets.get(ACCOUNT_REFRESH)? else {
+        return Ok(status(false, false, &s));
+    };
     match (Server { http: &state.http, base_url: &s.server_url }).refresh(&refresh).await {
         Ok(tokens) => {
             store_session(state, &tokens)?;
@@ -482,6 +554,276 @@ pub async fn account_sign_out(state: State<'_, AppState>) -> AppResult<()> {
     Ok(())
 }
 
+// ---- Dictation loop -----------------------------------------------------------------------------
+
+fn shortcuts(app: &AppHandle) -> AppResult<tauri::State<'_, Shortcuts>> {
+    app.try_state::<Shortcuts>().ok_or_else(|| AppError::internal("shortcuts are not running"))
+}
+
+#[tauri::command]
+pub fn shortcuts_status(app: AppHandle) -> AppResult<ShortcutsStatus> {
+    shortcuts(&app)?.status()
+}
+
+#[tauri::command]
+pub fn shortcuts_capture(app: AppHandle, owner: Option<WindowLabel>) -> AppResult<()> {
+    if owner.is_some_and(|o| o != WindowLabel::Onboarding) {
+        return Err(AppError::invalid("only onboarding can capture shortcuts"));
+    }
+    shortcuts(&app)?.set_capture(owner);
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
+pub async fn pipeline_run(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mode: Mode,
+    audio_base64: String,
+    source: run::RunSource,
+    audio_secs: Option<f64>,
+    target_language: Option<String>,
+    selected_text: Option<String>,
+    record_ms: Option<f64>,
+) -> AppResult<RunResult> {
+    let args = RunArgs { mode, audio_base64, source, target_language, selected_text, record_ms, audio_secs };
+    run::pipeline_run(&app, &state, args).await
+}
+
+#[tauri::command]
+pub fn pipeline_cancel(state: State<'_, AppState>) -> AppResult<()> {
+    if let Some(cancel) = state.session.lock().map_err(|_| AppError::internal("session lock poisoned"))?.cancel.as_ref() {
+        cancel.cancel();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn output_insert(state: State<'_, AppState>, text: String) -> AppResult<RunOutput> {
+    if text.is_empty() || text.len() > 100_000 {
+        return Err(AppError::invalid("Nothing to insert"));
+    }
+    Ok(run::insert_answer(&state, &text).await)
+}
+
+#[tauri::command]
+pub fn clipboard_copy(text: String) -> AppResult<()> {
+    if text.len() > 100_000 {
+        return Err(AppError::invalid("The text is too long"));
+    }
+    run::copy(&text);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn bar_layout(app: AppHandle, layout: windows::BarLayout, interactive: bool, escape: Option<bool>) -> AppResult<()> {
+    if let Ok(s) = shortcuts(&app) {
+        s.set_card_open(escape.unwrap_or(false));
+    }
+    windows::set_bar(&app, layout, interactive)
+}
+
+#[tauri::command]
+pub fn bar_menu(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    let has_last = state.session.lock().map(|s| s.last_text.is_some()).unwrap_or(false) || state.db.last_ok_run()?.is_some();
+    windows::bar_menu(&app, has_last, &state.snapshot()?.languages.translate_targets)
+}
+
+/// The bar menu's items.
+pub fn on_bar_menu(app: &AppHandle, id: &str) {
+    let Some(state) = app.try_state::<AppState>() else { return };
+    if id == windows::MENU_COPY {
+        let last = state.session.lock().ok().and_then(|s| s.last_text.clone());
+        let last = last.or_else(|| state.db.last_ok_run().ok().flatten().map(|r| r.refined_text));
+        if let Some(text) = last {
+            run::copy(&text);
+        }
+    } else if id == windows::MENU_OPEN {
+        let _ = crate::tray::open_main(app);
+    } else if let Some(tag) = id.strip_prefix(windows::MENU_LANG)
+        && let Ok(before) = state.snapshot()
+    {
+        let targets = windows::with_first_target(&before.languages.translate_targets, tag);
+        if let Ok(next) = state.update_settings(&json!({ "languages": { "translate_targets": targets } })) {
+            after_settings_change(app, &before, &next);
+        }
+    }
+}
+
+#[tauri::command]
+pub fn hint_take(state: State<'_, AppState>, kind: HintKind) -> AppResult<bool> {
+    run::hint_take(&state, kind)
+}
+
+// ---- History and usage --------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn runs_list(state: State<'_, AppState>, search: Option<String>, before: Option<i64>, limit: Option<u32>) -> AppResult<Vec<db::RunRecord>> {
+    state.db.list_runs(&db::RunsQuery { search, before, limit })
+}
+
+#[tauri::command]
+pub async fn run_get(state: State<'_, AppState>, id: String) -> AppResult<db::RunRecord> {
+    state.db.get_run(&id)
+}
+
+#[tauri::command]
+pub async fn run_delete(app: AppHandle, state: State<'_, AppState>, id: String) -> AppResult<()> {
+    state.db.delete_run(&id)?;
+    let _ = app.emit("history://changed", json!({ "id": id }));
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn runs_clear(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    state.db.clear_runs()?;
+    let _ = app.emit("history://changed", json!({}));
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn run_rerun(app: AppHandle, state: State<'_, AppState>, id: String) -> AppResult<db::RunRecord> {
+    let run = run::rerun(&state, &id).await?;
+    let _ = app.emit("history://changed", json!({ "id": id }));
+    Ok(run)
+}
+
+#[tauri::command]
+pub async fn run_audio(state: State<'_, AppState>, id: String) -> AppResult<String> {
+    Ok(base64::engine::general_purpose::STANDARD.encode(state.db.run_audio(&id)?))
+}
+
+#[tauri::command]
+pub async fn usage_summary(state: State<'_, AppState>, range: db::UsageRange) -> AppResult<db::UsageSummary> {
+    state.db.usage_summary(range, now_ms())
+}
+
+#[tauri::command]
+pub async fn usage_daily(state: State<'_, AppState>, range: db::UsageRange) -> AppResult<Vec<db::Day>> {
+    state.db.usage_daily(range, now_ms())
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExportResult {
+    pub path: String,
+}
+
+#[tauri::command]
+pub async fn usage_export_csv(app: AppHandle, state: State<'_, AppState>, range: db::UsageRange) -> AppResult<ExportResult> {
+    let csv = state.db.usage_csv(range, now_ms())?;
+    let dir = app.path().download_dir().map_err(|e| AppError::internal(e.to_string()))?;
+    let label = match range {
+        db::UsageRange::Today => "today",
+        db::UsageRange::Week => "7d",
+        db::UsageRange::Month => "30d",
+        db::UsageRange::Quarter => "90d",
+    };
+    let mut path = dir.join(format!("comma-usage-{label}.csv"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("comma-usage-{label}-{n}.csv"));
+        n += 1;
+    }
+    std::fs::write(&path, csv)?;
+    Ok(ExportResult { path: path.to_string_lossy().into_owned() })
+}
+
+// ---- Dictionary: local in Local mode, the server's in account mode ------------------------------
+
+fn account_mode(state: &AppState) -> AppResult<bool> {
+    Ok(state.snapshot()?.mode == AppMode::Account)
+}
+
+fn server_term(t: account::ServerTerm) -> db::Term {
+    db::Term { id: t.id, term: t.term, created_at: t.created_at }
+}
+
+#[tauri::command]
+pub async fn dictionary_list(state: State<'_, AppState>) -> AppResult<Vec<db::Term>> {
+    if !account_mode(&state)? {
+        return state.db.terms();
+    }
+    let url = state.server_url()?;
+    let terms = run::with_access(&state, |t| {
+        let url = url.clone();
+        let http = state.http.clone();
+        async move { Server { http: &http, base_url: &url }.dictionary(&t).await }
+    })
+    .await?;
+    Ok(terms.into_iter().map(server_term).collect())
+}
+
+#[tauri::command]
+pub async fn dictionary_add(state: State<'_, AppState>, term: String) -> AppResult<db::Term> {
+    let term = db::clean_term(&term)?;
+    if !account_mode(&state)? {
+        return state.db.add_term(&term);
+    }
+    let url = state.server_url()?;
+    let added = run::with_access(&state, |t| {
+        let (url, http, term) = (url.clone(), state.http.clone(), term.clone());
+        async move { Server { http: &http, base_url: &url }.dictionary_add(&t, &term).await }
+    })
+    .await?;
+    Ok(server_term(added))
+}
+
+#[tauri::command]
+pub async fn dictionary_update(state: State<'_, AppState>, id: String, term: String) -> AppResult<db::Term> {
+    let term = db::clean_term(&term)?;
+    if !account_mode(&state)? {
+        return state.db.update_term(&id, &term);
+    }
+    let url = state.server_url()?;
+    let updated = run::with_access(&state, |t| {
+        let (url, http, term, id) = (url.clone(), state.http.clone(), term.clone(), id.clone());
+        async move { Server { http: &http, base_url: &url }.dictionary_update(&t, &id, &term).await }
+    })
+    .await?;
+    Ok(server_term(updated))
+}
+
+#[tauri::command]
+pub async fn dictionary_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    if !account_mode(&state)? {
+        return state.db.delete_term(&id);
+    }
+    let url = state.server_url()?;
+    run::with_access(&state, |t| {
+        let (url, http, id) = (url.clone(), state.http.clone(), id.clone());
+        async move { Server { http: &http, base_url: &url }.dictionary_delete(&t, &id).await }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn dictionary_import_csv(state: State<'_, AppState>, csv: String) -> AppResult<db::ImportResult> {
+    if csv.len() > 200_000 {
+        return Err(AppError::invalid("That file is too large to import"));
+    }
+    if !account_mode(&state)? {
+        return state.db.import_terms(&csv);
+    }
+    let url = state.server_url()?;
+    let res = run::with_access(&state, |t| {
+        let (url, http, csv) = (url.clone(), state.http.clone(), csv.clone());
+        async move { Server { http: &http, base_url: &url }.dictionary_import(&t, &csv).await }
+    })
+    .await?;
+    Ok(db::ImportResult { added: res.added, skipped: res.skipped })
+}
+
+#[tauri::command]
+pub async fn account_credits(state: State<'_, AppState>) -> AppResult<account::Credits> {
+    let url = state.server_url()?;
+    run::with_access(&state, |t| {
+        let (url, http) = (url.clone(), state.http.clone());
+        async move { Server { http: &http, base_url: &url }.credits(&t).await }
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,7 +833,12 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn state(dir: &tempfile::TempDir) -> AppState {
-        AppState::new(Settings::default(), dir.path().join(settings::FILE_NAME), Box::new(MemoryStore::default()))
+        AppState::new(
+            Settings::default(),
+            dir.path().join(settings::FILE_NAME),
+            Box::new(MemoryStore::default()),
+            Db::in_memory(dir.path().join("audio")).unwrap(),
+        )
     }
 
     #[test]
@@ -587,6 +934,68 @@ mod tests {
         let err = llm_test_impl(&state, None, Some("nope/no-such-model".into()), None).await.unwrap_err();
         println!("unknown model: {err:?}");
         assert_eq!(err.code, ErrorCode::UnknownModel);
+    }
+
+    /// Account mode: an expired access token is refused with 401, refreshed once, and the call is
+    /// retried with the new token; the refreshed pair is stored.
+    #[tokio::test]
+    async fn account_calls_refresh_on_401_and_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir);
+        let mock = MockServer::start().await;
+        let user = r#"{"id":"8f1c2f5e-2d0c-4f5e-9b8a-3e1f7a6b9c01","email":"ada@example.com","name":"Ada","email_verified":true,"plan":"free","settings":{"languages":[],"translate_targets":[],"context_level":"app","provider_mode":"comma"},"created_at":"2026-11-18T10:00:00.000Z"}"#;
+        Mock::given(method("GET"))
+            .and(path("/v1/me/credits"))
+            .and(header("authorization", "Bearer old"))
+            .respond_with(ResponseTemplate::new(401).set_body_string(r#"{"code":"invalid_token","message":"expired"}"#))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/me/credits"))
+            .and(header("authorization", "Bearer new"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"plan":"free","period_start":"2026-11-16T00:00:00.000Z","period_end":"2026-11-23T00:00:00.000Z","used_seconds":60,"limit_seconds":1800}"#,
+            ))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(r#"{{"access_token":"new","refresh_token":"r2","expires_in":900,"user":{user}}}"#)))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        state.secrets.set(ACCOUNT_ACCESS, "old").unwrap();
+        state.secrets.set(ACCOUNT_REFRESH, "r1").unwrap();
+        // The stored token looks fresh, so the first call uses it and gets the 401.
+        state
+            .update_settings(&json!({ "mode": "account", "account": { "server_url": mock.uri(), "access_expires_at": now_secs() + 600 } }))
+            .unwrap();
+        let url = state.server_url().unwrap();
+        let credits = run::with_access(&state, |t| {
+            let (url, http) = (url.clone(), state.http.clone());
+            async move { Server { http: &http, base_url: &url }.credits(&t).await }
+        })
+        .await
+        .unwrap();
+        assert_eq!(credits.limit_seconds, 1800.0);
+        assert_eq!(state.secrets.get(ACCOUNT_REFRESH).unwrap().as_deref(), Some("r2"));
+
+        // Without a session the call fails as signed out, before any request.
+        clear_session(&state).unwrap();
+        let err = run::access_token(&state, false).await.unwrap_err();
+        assert_eq!(err.reason.as_deref(), Some("signed_out"));
+    }
+
+    /// The run's history and dictionary in Local mode go to SQLite.
+    #[tokio::test]
+    async fn local_dictionary_and_rerun_need_local_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir);
+        state.db.add_term("Comma").unwrap();
+        assert_eq!(state.db.terms().unwrap().len(), 1);
+        state.db.insert_run(&db::RunRecord { id: "r".into(), mode: "dictate".into(), provider: "local".into(), raw_text: "hi".into(), ok: true, ..Default::default() }, None).unwrap();
+        state.update_settings(&json!({ "mode": "account" })).unwrap();
+        assert_eq!(run::rerun(&state, "r").await.unwrap_err().code, ErrorCode::Unsupported);
     }
 
     #[tokio::test]

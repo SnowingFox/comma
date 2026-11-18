@@ -1,6 +1,7 @@
 //! Non-secret settings, persisted as JSON in the app config dir.
 //! Mirrors `Settings` / `SettingsPatch` in `packages/shared/src/ipc/settings.ts`.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -79,7 +80,8 @@ impl Default for LanguageSettings {
     }
 }
 
-/// Accelerators in the `Alt+Shift+Space` form used by the global-shortcut plugin.
+/// `Fn`, `Fn+Space`, `Fn+ShiftLeft` (the modifier listener), or an accelerator in the
+/// `Alt+Shift+Space` form used by the global-shortcut plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShortcutSettings {
@@ -90,8 +92,75 @@ pub struct ShortcutSettings {
 
 impl Default for ShortcutSettings {
     fn default() -> Self {
+        Self { dictate: "Fn".into(), ask: "Fn+Space".into(), translate: "Fn+ShiftLeft".into() }
+    }
+}
+
+impl ShortcutSettings {
+    /// Used for an Fn-based shortcut while Input Monitoring is not allowed (and the phase 1 defaults).
+    pub fn fallback() -> Self {
         Self { dictate: "Alt+Space".into(), ask: "Alt+Shift+Space".into(), translate: "Alt+Control+Space".into() }
     }
+
+    pub fn get(&self, mode: comma_voice::prompts::Mode) -> &str {
+        use comma_voice::prompts::Mode;
+        match mode {
+            Mode::Dictate => &self.dictate,
+            Mode::Ask => &self.ask,
+            Mode::Translate => &self.translate,
+        }
+    }
+}
+
+/// What a run may read from other apps (spec section 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextLevel {
+    Off,
+    App,
+    #[default]
+    AppAndSelection,
+}
+
+impl ContextLevel {
+    pub fn app(self) -> bool {
+        self != ContextLevel::Off
+    }
+
+    pub fn selection(self) -> bool {
+        self == ContextLevel::AppAndSelection
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FeedbackSettings {
+    pub sounds: bool,
+    pub show_idle_bar: bool,
+    pub hints: bool,
+    /// Lower the Mac's output volume while recording.
+    pub duck_audio: bool,
+}
+
+impl Default for FeedbackSettings {
+    fn default() -> Self {
+        Self { sounds: true, show_idle_bar: false, hints: true, duck_audio: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct PrivacySettings {
+    pub keep_audio: bool,
+    /// Runs older than this many days are deleted; 0 keeps them.
+    pub history_days: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioSettings {
+    /// `MediaDeviceInfo.deviceId`; empty for the system default.
+    pub microphone_id: String,
 }
 
 /// The Comma server and who is signed in. Tokens live in the Keychain, not here.
@@ -125,6 +194,12 @@ pub struct Settings {
     pub languages: LanguageSettings,
     pub shortcuts: ShortcutSettings,
     pub account: AccountSettings,
+    pub context_level: ContextLevel,
+    pub feedback: FeedbackSettings,
+    pub privacy: PrivacySettings,
+    pub audio: AudioSettings,
+    /// How often each bar hint has been shown. Written by Rust only.
+    pub hint_counts: BTreeMap<String, u32>,
 }
 
 impl Default for Settings {
@@ -140,6 +215,11 @@ impl Default for Settings {
             languages: LanguageSettings::default(),
             shortcuts: ShortcutSettings::default(),
             account: AccountSettings::default(),
+            context_level: ContextLevel::default(),
+            feedback: FeedbackSettings::default(),
+            privacy: PrivacySettings::default(),
+            audio: AudioSettings::default(),
+            hint_counts: BTreeMap::new(),
         }
     }
 }
@@ -166,10 +246,18 @@ impl Settings {
         if !langs.spoken.iter().chain(&langs.translate_targets).all(|tag| is_language_tag(tag)) {
             return Err(AppError::invalid("languages must be tags such as en or pt-BR"));
         }
-        for accel in [&self.shortcuts.dictate, &self.shortcuts.ask, &self.shortcuts.translate] {
+        let sc = &self.shortcuts;
+        for accel in [&sc.dictate, &sc.ask, &sc.translate] {
             if accel.is_empty() || accel.len() > 64 || accel.chars().any(char::is_whitespace) {
-                return Err(AppError::invalid("shortcuts must look like Alt+Space"));
+                return Err(AppError::invalid("shortcuts must look like Fn+Space or Alt+Space"));
             }
+            crate::shortcuts::validate(accel)?;
+        }
+        if sc.dictate == sc.ask || sc.dictate == sc.translate || sc.ask == sc.translate {
+            return Err(AppError::invalid("each mode needs its own shortcut"));
+        }
+        if self.privacy.history_days > 3650 || self.audio.microphone_id.len() > 256 {
+            return Err(AppError::invalid("privacy.history_days or audio.microphone_id is out of range"));
         }
         if self.account.email.len() > 320 || self.account.name.len() > 200 {
             return Err(AppError::invalid("account details are too long"));
@@ -249,7 +337,13 @@ pub fn load(path: &Path) -> Settings {
         }
     };
     match serde_json::from_str::<Settings>(&raw).map_err(json_err).and_then(|s| s.validate().map(|_| s)) {
-        Ok(settings) => settings,
+        Ok(mut settings) => {
+            // Phase 1 saved its defaults explicitly; untouched ones move to the Fn defaults.
+            if settings.shortcuts == ShortcutSettings::fallback() {
+                settings.shortcuts = ShortcutSettings::default();
+            }
+            settings
+        }
         Err(err) => {
             eprintln!("comma: settings file is invalid ({err}); starting from defaults");
             let _ = fs::rename(path, path.with_extension("json.bak"));
@@ -289,8 +383,13 @@ mod tests {
                 "stt": { "model_id": "scribe_v3" },
                 "llm": { "base_url": MAGPIE_BASE_URL, "model": "", "reasoning_effort": "default" },
                 "languages": { "spoken": [], "auto_detect": true, "translate_targets": [] },
-                "shortcuts": { "dictate": "Alt+Space", "ask": "Alt+Shift+Space", "translate": "Alt+Control+Space" },
-                "account": { "server_url": DEFAULT_SERVER_URL, "email": "", "name": "", "access_expires_at": 0 }
+                "shortcuts": { "dictate": "Fn", "ask": "Fn+Space", "translate": "Fn+ShiftLeft" },
+                "account": { "server_url": DEFAULT_SERVER_URL, "email": "", "name": "", "access_expires_at": 0 },
+                "context_level": "app_and_selection",
+                "feedback": { "sounds": true, "show_idle_bar": false, "hints": true, "duck_audio": true },
+                "privacy": { "keep_audio": false, "history_days": 0 },
+                "audio": { "microphone_id": "" },
+                "hint_counts": {}
             })
         );
     }
@@ -318,6 +417,10 @@ mod tests {
         assert!(s.apply_patch(&json!({ "languages": { "translate_targets": ["en", "fr", "de", "ja"] } })).is_err());
         assert!(s.apply_patch(&json!({ "languages": { "spoken": ["english"] } })).is_err());
         assert!(s.apply_patch(&json!({ "shortcuts": { "dictate": "" } })).is_err());
+        assert!(s.apply_patch(&json!({ "shortcuts": { "dictate": "Fn+Q" } })).is_err());
+        assert!(s.apply_patch(&json!({ "shortcuts": { "ask": "Fn" } })).is_err(), "two modes on one shortcut");
+        assert!(s.apply_patch(&json!({ "shortcuts": { "ask": "Alt+Nope" } })).is_err());
+        assert!(s.apply_patch(&json!({ "context_level": "everything" })).is_err());
         assert!(s.apply_patch(&json!({ "account": { "server_url": "localhost:8787" } })).is_err());
     }
 
@@ -332,7 +435,19 @@ mod tests {
         assert_eq!(next.languages.spoken, ["zh-Hans", "en"]);
         assert!(next.languages.auto_detect);
         assert_eq!(next.shortcuts.dictate, "Control+Shift+D");
-        assert_eq!(next.shortcuts.ask, "Alt+Shift+Space");
+        assert_eq!(next.shortcuts.ask, "Fn+Space");
+    }
+
+    #[test]
+    fn phase_one_default_shortcuts_move_to_fn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let old = Settings { shortcuts: ShortcutSettings::fallback(), ..Settings::default() };
+        save(&path, &old).unwrap();
+        assert_eq!(load(&path).shortcuts, ShortcutSettings::default());
+        let custom = Settings { shortcuts: ShortcutSettings { dictate: "Control+Shift+D".into(), ..ShortcutSettings::fallback() }, ..Settings::default() };
+        save(&path, &custom).unwrap();
+        assert_eq!(load(&path).shortcuts.dictate, "Control+Shift+D");
     }
 
     #[test]
