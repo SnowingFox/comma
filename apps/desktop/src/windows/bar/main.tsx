@@ -29,7 +29,10 @@ type View =
   | { state: "empty"; message: string }
   | { state: "error"; message: string; runId?: string };
 
-/** Dev: `bar.html?state=recording&mode=translate` opens straight into a state. */
+/**
+ * Dev: `bar.html?state=recording&mode=translate` opens straight into a state; `hands=1`, `done=Copied`,
+ * `hint=<text>` and `answer=<text>` add the rest of what the bar can show.
+ */
 function devInitial(): BarPreviewPayload | null {
   if (!import.meta.env.DEV || inTauri) return null;
   const params = new URLSearchParams(window.location.search);
@@ -402,7 +405,23 @@ function BarApp() {
   }, []);
 
   if (preview) {
-    return <BarView state={preview.state} mode={preview.mode} message={preview.message ?? (preview.state === "error" ? "Couldn't reach ElevenLabs" : undefined)} />;
+    const params = new URLSearchParams(window.location.search);
+    const hintText = params.get("hint");
+    const answerText = params.get("answer");
+    const noop = () => {};
+    return (
+      <BarView
+        state={preview.state}
+        mode={preview.mode}
+        message={preview.message ?? (preview.state === "error" ? "Couldn't reach ElevenLabs" : undefined)}
+        handsFree={params.get("hands") === "1"}
+        doneLabel={params.get("done") ?? undefined}
+        language={params.get("lang") ?? undefined}
+        hint={hintText ? { text: hintText, actions: params.get("actions") ? params.get("actions")!.split(",").map((label, i) => ({ label, primary: i === 0, onClick: noop })) : undefined, onDismiss: noop } : null}
+        answer={answerText ? { text: answerText, onCopy: noop, onInsert: noop, onClose: noop } : null}
+        onDetails={preview.state === "error" ? noop : undefined}
+      />
+    );
   }
   const v = loop.view;
   return (

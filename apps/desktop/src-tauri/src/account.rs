@@ -286,8 +286,8 @@ pub fn map_api_error(status: StatusCode, body: &str, secrets: &[&str]) -> AppErr
         "quota_exceeded" => {
             let resets = json.as_ref().and_then(|j| j.get("resets_at")).and_then(Value::as_str).and_then(|t| t.get(..10));
             match resets {
-                Some(day) => format!("You've used this week's Comma minutes. They renew on {day}"),
-                None => "You've used this week's Comma minutes".to_owned(),
+                Some(day) => format!("Out of Comma minutes until {day}"),
+                None => "Out of Comma minutes for this week".to_owned(),
             }
         }
         "no_speech" => "Didn't catch that".to_owned(),
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn maps_voice_errors() {
         let e = map_api_error(StatusCode::PAYMENT_REQUIRED, r#"{"code":"quota_exceeded","message":"x","resets_at":"2026-11-23T00:00:00.000Z"}"#, &[]);
-        assert_eq!((e.message.as_str(), e.reason.as_deref()), ("You've used this week's Comma minutes. They renew on 2026-11-23", Some("quota_exceeded")));
+        assert_eq!((e.message.as_str(), e.reason.as_deref()), ("Out of Comma minutes until 2026-11-23", Some("quota_exceeded")));
         let e = map_api_error(StatusCode::UNAUTHORIZED, r#"{"code":"unauthorized","message":"no"}"#, &[]);
         assert!(is_unauthorized(&e));
         assert!(is_unauthorized(&map_api_error(StatusCode::UNAUTHORIZED, "", &[])));

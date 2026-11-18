@@ -11,7 +11,7 @@ const FADE: Transition = { duration: 0.16, ease: "easeOut" };
 
 type Shape = { width: number; height: number; radius: number };
 
-function shapeFor(state: BarState, opts: { handsFree: boolean; doneLabel?: string; closing: boolean }): Shape {
+function shapeFor(state: BarState, opts: { handsFree: boolean; doneLabel?: string; closing: boolean; message?: string }): Shape {
   if (opts.closing) return { width: 6, height: 6, radius: 3 };
   switch (state) {
     case "idle":
@@ -25,7 +25,8 @@ function shapeFor(state: BarState, opts: { handsFree: boolean; doneLabel?: strin
     case "empty":
       return { width: 176, height: 40, radius: 20 };
     case "error":
-      return { width: 336, height: 44, radius: 14 };
+      // Wide enough for one line of most messages; the window is 460 px wide.
+      return { width: Math.round(Math.min(440, Math.max(300, 150 + (opts.message?.length ?? 24) * 7.4))), height: 44, radius: 14 };
   }
 }
 
@@ -184,7 +185,7 @@ export function BarView({
   onContextMenu,
 }: BarViewProps) {
   const reduced = useReducedMotion();
-  const shape = shapeFor(state, { handsFree, doneLabel, closing });
+  const shape = shapeFor(state, { handsFree, doneLabel, closing, message });
   const fallbackLevel = useMemo(() => (import.meta.env.DEV ? createFakeLevel() : undefined), []);
   const recordingFor = useElapsed(state === "recording");
   const processingFor = useElapsed(state === "processing");
