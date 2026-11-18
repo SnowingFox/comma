@@ -332,7 +332,7 @@ pub fn load(path: &Path) -> Settings {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Settings::default(),
         Err(err) => {
-            eprintln!("comma: cannot read settings: {err}");
+            log::warn!("cannot read settings: {err}");
             return Settings::default();
         }
     };
@@ -345,7 +345,7 @@ pub fn load(path: &Path) -> Settings {
             settings
         }
         Err(err) => {
-            eprintln!("comma: settings file is invalid ({err}); starting from defaults");
+            log::warn!("settings file is invalid ({err}); starting from defaults");
             let _ = fs::rename(path, path.with_extension("json.bak"));
             Settings::default()
         }

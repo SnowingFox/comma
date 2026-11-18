@@ -162,29 +162,28 @@ pub async fn secret_status(state: State<'_, AppState>) -> AppResult<SecretStatus
     secrets::status(state.secrets.as_ref())
 }
 
+/// The preflight answers only. A running Fn tap is no proof: macOS creates one without the
+/// permission and then delivers little or nothing to it.
 #[tauri::command]
-pub fn permissions_status(app: AppHandle) -> PermissionsStatus {
-    let mut status = permissions::status();
-    // The preflight can say no while the tap works (it is the real answer).
-    if app.try_state::<Shortcuts>().is_some_and(|s| s.fn_running()) {
-        status.input_monitoring = permissions::PermissionState::Granted;
-    }
-    status
+pub fn permissions_status() -> PermissionsStatus {
+    permissions::status()
 }
 
 #[tauri::command]
 pub fn input_monitoring_request(app: AppHandle) -> bool {
     let granted = comma_input::request_input_monitoring();
+    log::info!("Input Monitoring requested: {}", if granted { "allowed" } else { "not allowed yet" });
     if let Some(shortcuts) = app.try_state::<Shortcuts>() {
-        shortcuts.enable_probe();
-        if let Some(state) = app.try_state::<AppState>()
-            && let Ok(s) = state.snapshot()
-        {
-            shortcuts.reconfigure(&app, &s.shortcuts);
-        }
-        return granted || shortcuts.fn_running();
+        shortcuts.probe(&app);
     }
     granted
+}
+
+/// Quits and relaunches Comma, for a permission macOS applies only to a new process.
+#[tauri::command]
+pub fn app_restart(app: AppHandle) {
+    log::info!("restarting at the user's request");
+    app.restart();
 }
 
 #[tauri::command]
@@ -567,11 +566,29 @@ pub fn shortcuts_status(app: AppHandle) -> AppResult<ShortcutsStatus> {
 
 #[tauri::command]
 pub fn shortcuts_capture(app: AppHandle, owner: Option<WindowLabel>) -> AppResult<()> {
-    if owner.is_some_and(|o| o != WindowLabel::Onboarding) {
-        return Err(AppError::invalid("only onboarding can capture shortcuts"));
+    if owner == Some(WindowLabel::Bar) {
+        return Err(AppError::invalid("only onboarding and the hub can capture shortcuts"));
     }
     shortcuts(&app)?.set_capture(owner);
     Ok(())
+}
+
+/// Stops the Fn tap and the plugin shortcuts and registers everything again.
+#[tauri::command]
+pub fn shortcuts_restart(app: AppHandle) -> AppResult<ShortcutsStatus> {
+    log::info!("shortcuts: restart requested");
+    let s = shortcuts(&app)?;
+    s.restart(&app);
+    s.status()
+}
+
+/// Re-checks Input Monitoring and tries the tap even when the preflight says no.
+#[tauri::command]
+pub fn shortcuts_probe(app: AppHandle) -> AppResult<ShortcutsStatus> {
+    log::info!("shortcuts: probe requested");
+    let s = shortcuts(&app)?;
+    s.probe(&app);
+    s.status()
 }
 
 #[tauri::command]
@@ -595,6 +612,16 @@ pub async fn pipeline_run(
 ) -> AppResult<RunResult> {
     let args = RunArgs { mode, audio_base64, source, target_language, selected_text, record_ms, audio_secs };
     run::pipeline_run(&app, &state, args).await
+}
+
+/// Whether a run can start (keys or session), checked by the bar when the shortcut goes down.
+#[tauri::command]
+pub async fn pipeline_check(state: State<'_, AppState>, mode: Mode) -> AppResult<()> {
+    let ready = run::readiness(&state);
+    if let Err(e) = &ready {
+        log::warn!("{mode:?} cannot start: {}", e.reason.as_deref().unwrap_or(&e.message));
+    }
+    ready
 }
 
 #[tauri::command]
@@ -655,6 +682,70 @@ pub fn on_bar_menu(app: &AppHandle, id: &str) {
             after_settings_change(app, &before, &next);
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct LogTail {
+    pub path: String,
+    pub lines: Vec<String>,
+}
+
+pub const LOG_FILE: &str = "comma";
+const LOG_TAIL_BYTES: u64 = 256 * 1024;
+
+/// The last `lines` lines of the current log file.
+pub fn read_tail(path: &std::path::Path, lines: usize) -> AppResult<Vec<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(LOG_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf);
+    let mut all: Vec<&str> = text.lines().collect();
+    if start > 0 && !all.is_empty() {
+        // The first line was cut by the seek.
+        all.remove(0);
+    }
+    Ok(all[all.len().saturating_sub(lines)..].iter().map(|l| (*l).to_owned()).collect())
+}
+
+#[tauri::command]
+pub async fn log_tail(app: AppHandle, lines: Option<u32>) -> AppResult<LogTail> {
+    let dir = app.path().app_log_dir().map_err(|e| AppError::internal(e.to_string()))?;
+    let path = dir.join(format!("{LOG_FILE}.log"));
+    let lines = read_tail(&path, lines.unwrap_or(200).clamp(1, 1000) as usize)?;
+    Ok(LogTail { path: path.to_string_lossy().into_owned(), lines })
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+/// A line from a window (the bar's microphone errors, for instance). Windows send states and error
+/// names only, never text the user dictated or typed.
+#[tauri::command]
+pub fn log_write(level: LogLevel, scope: String, message: String) -> AppResult<()> {
+    if scope.len() > 32 || message.len() > 500 {
+        return Err(AppError::invalid("log line too long"));
+    }
+    let scope: String = scope.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    let message = message.replace(['\n', '\r'], " ");
+    match level {
+        LogLevel::Info => log::info!(target: "webview", "[{scope}] {message}"),
+        LogLevel::Warn => log::warn!(target: "webview", "[{scope}] {message}"),
+        LogLevel::Error => log::error!(target: "webview", "[{scope}] {message}"),
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -865,6 +956,21 @@ mod tests {
 
         assert!(state.update_settings(&json!({ "theme": 3 })).is_err());
         assert_eq!(*state.settings.lock().unwrap(), next);
+    }
+
+    #[test]
+    fn log_tail_reads_the_last_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comma.log");
+        assert!(read_tail(&path, 10).unwrap().is_empty(), "no file yet");
+        std::fs::write(&path, (1..=50).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        assert_eq!(read_tail(&path, 3).unwrap(), ["line 48", "line 49", "line 50"]);
+        // Longer than the tail window: the cut first line is dropped.
+        let long: String = (0..40_000).map(|i| format!("entry {i:06}\n")).collect();
+        std::fs::write(&path, long).unwrap();
+        let tail = read_tail(&path, 100_000).unwrap();
+        assert!(tail.iter().all(|l| l.starts_with("entry ") && l.len() == 12));
+        assert_eq!(tail.last().unwrap(), "entry 039999");
     }
 
     #[test]

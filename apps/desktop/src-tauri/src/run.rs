@@ -148,7 +148,8 @@ pub fn on_action(app: &AppHandle, action: &Action, target: Target) {
                 session.context = None;
                 session.seq
             };
-            if target == Target::Onboarding {
+            // The onboarding try steps and the Fn key test record nothing here.
+            if target != Target::Bar {
                 return;
             }
             crate::ducking::duck(&state);
@@ -248,11 +249,48 @@ fn start_hints(app: &AppHandle, state: &AppState) {
     } else if !comma_input::context::accessibility_trusted() {
         emit_hint(app, HintKind::Accessibility);
     } else if let Some(shortcuts) = app.try_state::<Shortcuts>()
-        && !shortcuts.fn_running()
+        && !shortcuts.fn_trusted()
         && [&s.shortcuts.dictate, &s.shortcuts.ask, &s.shortcuts.translate].iter().any(|a| a.starts_with("Fn"))
     {
         emit_hint(app, HintKind::InputMonitoring);
     }
+}
+
+// ---- readiness --------------------------------------------------------------------------------------
+
+/// Local mode without an ElevenLabs key.
+pub fn missing_elevenlabs_key() -> AppError {
+    AppError::new(ErrorCode::NotConfigured, "Add your ElevenLabs key in Settings to start dictating").with_reason("missing_elevenlabs_key")
+}
+
+fn missing_llm_model() -> AppError {
+    AppError::new(ErrorCode::NotConfigured, "Pick an LLM model in Settings to start dictating").with_reason("missing_llm_model")
+}
+
+/// What a run needs before any audio is recorded: in Local mode the ElevenLabs key, then an LLM
+/// model; in account mode a session. The bar checks this when the shortcut goes down and shows the
+/// error instead of recording.
+pub fn readiness(state: &AppState) -> AppResult<()> {
+    let s = state.snapshot()?;
+    match s.mode {
+        AppMode::Account => {
+            if state.secrets.get(crate::secrets::ACCOUNT_REFRESH)?.is_none() {
+                return Err(signed_out());
+            }
+        }
+        AppMode::Local => local_ready(state, &s)?,
+    }
+    Ok(())
+}
+
+fn local_ready(state: &AppState, s: &crate::settings::Settings) -> AppResult<()> {
+    if crate::secrets::get_key(state.secrets.as_ref(), crate::secrets::SecretName::Elevenlabs)?.is_none() {
+        return Err(missing_elevenlabs_key());
+    }
+    if s.llm.model.is_empty() {
+        return Err(missing_llm_model());
+    }
+    Ok(())
 }
 
 // ---- pipeline_run ---------------------------------------------------------------------------------
@@ -295,7 +333,7 @@ pub enum RunOutput {
 }
 
 impl RunOutput {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             RunOutput::Pasted => "pasted",
             RunOutput::Copied => "copied",
@@ -455,16 +493,38 @@ pub async fn pipeline_run(app: &AppHandle, state: &AppState, args: RunArgs) -> A
         session.cancel = Some(cancel.clone());
     }
     let _guard = RunGuard { state, shortcuts };
+    log::info!("run {id}: {} from {source_label}, {} KB of audio", mode_str(args.mode), args.audio_base64.len() * 3 / 4 / 1024);
 
     let emit = |label: &str, event: &str, payload: Value| {
+        if event == "run://stage" {
+            log::info!("run {id}: {} done after {} ms", payload["stage"].as_str().unwrap_or("?"), payload["ms"]);
+            // The devtool in the hub follows the stages too (never the text deltas).
+            if label != WindowLabel::Hub.as_str() {
+                let _ = app.emit_to(WindowLabel::Hub.as_str(), event, payload.clone());
+            }
+        }
         let _ = app.emit_to(label, event, payload);
     };
     let result = run_inner(&emit, state, &args, &id, source_label, cancel, started).await;
     match &result {
         Ok(done) => {
+            log::info!(
+                "run {id}: ok in {} ms (stt {} ms, llm first token {:?} ms, llm {} ms), {:.1} s audio, output {}",
+                done.total_ms,
+                done.stt_ms,
+                done.llm_ttft_ms,
+                done.llm_total_ms,
+                done.audio_secs,
+                done.output.as_str()
+            );
             let _ = app.emit("run://done", json!({ "id": id, "result": done }));
         }
         Err(e) => {
+            if matches!(e.code, ErrorCode::Cancelled | ErrorCode::NoSpeech) {
+                log::info!("run {id}: {:?}", e.code);
+            } else {
+                log::warn!("run {id}: failed after {} ms: {:?} {}{}", ms(started.elapsed()), e.code, e.message, e.reason.as_deref().map(|r| format!(" ({r})")).unwrap_or_default());
+            }
             let _ = app.emit("run://error", json!({ "id": id, "code": e.code, "message": e.message, "reason": e.reason }));
         }
     }
@@ -633,9 +693,8 @@ async fn run_local(
     cancel: CancellationToken,
 ) -> AppResult<Outcome> {
     let s = state.snapshot()?;
-    if s.llm.model.is_empty() {
-        return Err(AppError::new(ErrorCode::NotConfigured, "Pick an LLM model in Settings first"));
-    }
+    // The key first: without it nothing can run, and that is the message the user needs.
+    local_ready(state, &s)?;
     let stt = state.elevenlabs()?;
     let endpoint = state.llm_endpoint(None)?;
     let terms: Vec<String> = state.db.terms()?.into_iter().map(|t| t.term).collect();
@@ -805,7 +864,7 @@ fn output_blocking(text: &str, can_paste: bool, pid: Option<i32>) -> RunOutput {
     match paste_and_restore(&pb, &MacKeys, text, RESTORE_AFTER, std::thread::sleep) {
         Ok(_) => RunOutput::Pasted,
         Err(e) => {
-            eprintln!("comma: paste failed ({e}); copied instead");
+            log::warn!("paste failed ({e}); copied instead");
             copy_text(&pb, text);
             RunOutput::Copied
         }
@@ -936,6 +995,57 @@ mod tests {
             let warm = post(http, body.clone()).await;
             println!("cold {cold} ms, prewarmed {warm} ms");
         }
+    }
+
+    fn test_state(dir: &tempfile::TempDir) -> AppState {
+        AppState::new(
+            crate::settings::Settings::default(),
+            dir.path().join(crate::settings::FILE_NAME),
+            Box::new(crate::secrets::memory::MemoryStore::default()),
+            crate::db::Db::in_memory(dir.path().join("audio")).unwrap(),
+        )
+    }
+
+    /// No key saved: the bar must say so when the shortcut goes down, and the key comes first.
+    #[test]
+    fn readiness_names_the_missing_key_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir);
+        let err = readiness(&state).unwrap_err();
+        assert_eq!((err.code, err.reason.as_deref()), (ErrorCode::NotConfigured, Some("missing_elevenlabs_key")));
+        assert!(err.message.contains("ElevenLabs key"));
+
+        crate::secrets::set_secret(state.secrets.as_ref(), crate::secrets::SecretName::Elevenlabs, "el-key").unwrap();
+        assert_eq!(readiness(&state).unwrap_err().reason.as_deref(), Some("missing_llm_model"));
+
+        state.update_settings(&json!({ "llm": { "model": "m" } })).unwrap();
+        assert!(readiness(&state).is_ok());
+
+        state.update_settings(&json!({ "mode": "account" })).unwrap();
+        assert_eq!(readiness(&state).unwrap_err().reason.as_deref(), Some("signed_out"));
+    }
+
+    /// The run itself reports the key before the model, the same as the check.
+    #[tokio::test]
+    async fn a_run_without_a_key_says_add_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir);
+        let args = RunArgs {
+            mode: Mode::Dictate,
+            audio_base64: base64::engine::general_purpose::STANDARD.encode(wav::test_clip()),
+            source: RunSource::Onboarding,
+            target_language: None,
+            selected_text: None,
+            record_ms: None,
+            audio_secs: None,
+        };
+        let emit = |_: &str, _: &str, _: Value| {};
+        let err = run_inner(&emit, &state, &args, "r1", "onboarding", CancellationToken::new(), Instant::now()).await.unwrap_err();
+        assert_eq!(err.reason.as_deref(), Some("missing_elevenlabs_key"));
+        // The failed run is in history with that message.
+        let runs = state.db.list_runs(&db::RunsQuery::default()).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(!runs[0].ok && runs[0].error.as_deref().is_some_and(|e| e.contains("ElevenLabs key")));
     }
 
     #[test]

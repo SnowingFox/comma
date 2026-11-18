@@ -28,6 +28,9 @@ base64.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
 tauri-plugin-global-shortcut = "2"
+# The app log in ~/Library/Logs/app.comma.desktop, rotated.
+tauri-plugin-log = "2"
+log.workspace = true
 # SQLite for history, usage and the local dictionary; bundled so the app does not depend on the system library.
 rusqlite = { version = "0.37", features = ["bundled"] }
 uuid.workspace = true

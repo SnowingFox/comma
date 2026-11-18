@@ -4,6 +4,11 @@
 //! autorepeat field and the modifier flags of each, and hands them to a [`Matcher`] that keeps
 //! only the configured keys (see the privacy rule in [`crate::binding`]). Being listen-only, it
 //! never blocks, changes or swallows an event.
+//!
+//! Without Input Monitoring, macOS still creates a listen-only tap (`CGEventTapCreate` returns a
+//! port) but filters what it delivers, so a running tap is not proof of the permission. Callers
+//! check [`input_monitoring_granted`] as well, and [`FnTap::delivered`] tells whether any event
+//! has arrived since the tap started.
 
 use crate::binding::{FnBindings, Matcher, MatcherOutput};
 
@@ -26,12 +31,19 @@ pub use stub::{FnTap, input_monitoring_granted, request_input_monitoring};
 struct Shared {
     matcher: std::sync::Mutex<Matcher>,
     listen_escape: std::sync::atomic::AtomicBool,
+    /// Some event reached the callback since the tap started. Only this flag is kept, no count.
+    delivered: std::sync::atomic::AtomicBool,
     handler: Box<dyn Fn(MatcherOutput) + Send + Sync>,
 }
 
 impl Shared {
     fn new(bindings: FnBindings, handler: Box<dyn Fn(MatcherOutput) + Send + Sync>) -> Self {
-        Self { matcher: std::sync::Mutex::new(Matcher::new(bindings)), listen_escape: Default::default(), handler }
+        Self {
+            matcher: std::sync::Mutex::new(Matcher::new(bindings)),
+            listen_escape: Default::default(),
+            delivered: Default::default(),
+            handler,
+        }
     }
 
     fn set_bindings(&self, bindings: FnBindings) {
@@ -121,6 +133,11 @@ mod mac {
             self.state.shared.listen_escape.store(on, Ordering::Relaxed);
         }
 
+        /// Whether any keyboard event has reached the tap since it started.
+        pub fn delivered(&self) -> bool {
+            self.state.shared.delivered.load(Ordering::Relaxed)
+        }
+
         pub fn stop(mut self) {
             self.shutdown();
         }
@@ -203,8 +220,11 @@ mod mac {
                 if let Some(port) = unsafe { port.as_ref() } {
                     CGEvent::tap_enable(port, true);
                 }
+                let why = if ty == CGEventType::TapDisabledByTimeout { "timeout" } else { "user input" };
+                log::warn!("Fn listener: macOS disabled the tap ({why}); re-enabled");
                 return;
             }
+            state.shared.delivered.store(true, Ordering::Relaxed);
             // SAFETY: CoreGraphics passes a valid event for the duration of the callback.
             let ev = unsafe { event.as_ref() };
             let keycode = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventKeycode) as u16;
@@ -240,10 +260,12 @@ mod mac {
             let granted = input_monitoring_granted();
             println!("input monitoring granted: {granted}");
             // Starting the tap agrees with the preflight answer.
+            // Without the permission the tap is usually still created (it only receives less).
             let tap = FnTap::start(FnBindings::default(), |_| {});
             println!("tap start: {:?}", tap.as_ref().map(|_| ()));
-            if granted {
-                tap.unwrap().stop();
+            if let Ok(tap) = tap {
+                println!("delivered: {}", tap.delivered());
+                tap.stop();
             }
         }
     }
@@ -272,6 +294,9 @@ mod stub {
         }
         pub fn set_bindings(&self, _bindings: FnBindings) {}
         pub fn set_listen_escape(&self, _on: bool) {}
+        pub fn delivered(&self) -> bool {
+            false
+        }
         pub fn stop(self) {}
     }
 }
