@@ -1,4 +1,5 @@
-//! API keys in the macOS Keychain. Values go in and never come back out to the frontend.
+//! API keys and account tokens in the macOS Keychain. Values go in and never come back out to the
+//! frontend; only Rust reads them, to make the provider and server calls.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,34 +24,44 @@ impl SecretName {
     }
 }
 
+/// Keychain entries only Rust writes: the Comma server session.
+pub const ACCOUNT_ACCESS: &str = "account_access";
+pub const ACCOUNT_REFRESH: &str = "account_refresh";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SecretStatus {
     pub elevenlabs: bool,
     pub llm: bool,
 }
 
+/// Keyed by the Keychain account name (`SecretName::account` or one of the constants above).
 pub trait SecretStore: Send + Sync {
-    fn set(&self, name: SecretName, value: &str) -> AppResult<()>;
-    fn delete(&self, name: SecretName) -> AppResult<()>;
-    fn exists(&self, name: SecretName) -> AppResult<bool>;
+    fn set(&self, account: &str, value: &str) -> AppResult<()>;
+    fn delete(&self, account: &str) -> AppResult<()>;
+    fn get(&self, account: &str) -> AppResult<Option<String>>;
+}
+
+/// A stored key, for Rust-side calls only. Never return it from a command.
+pub fn get_key(store: &dyn SecretStore, name: SecretName) -> AppResult<Option<String>> {
+    Ok(store.get(name.account())?.filter(|v| !v.is_empty()))
 }
 
 /// Sets or, for an empty value, deletes a secret. Surrounding whitespace from a paste is trimmed.
 pub fn set_secret(store: &dyn SecretStore, name: SecretName, value: &str) -> AppResult<()> {
     let value = value.trim();
     if value.is_empty() {
-        return store.delete(name);
+        return store.delete(name.account());
     }
     if value.len() > MAX_SECRET_LEN || value.chars().any(char::is_control) {
         return Err(AppError::invalid("the key has an unexpected format"));
     }
-    store.set(name, value)
+    store.set(name.account(), value)
 }
 
 pub fn status(store: &dyn SecretStore) -> AppResult<SecretStatus> {
     Ok(SecretStatus {
-        elevenlabs: store.exists(SecretName::Elevenlabs)?,
-        llm: store.exists(SecretName::Llm)?,
+        elevenlabs: get_key(store, SecretName::Elevenlabs)?.is_some(),
+        llm: get_key(store, SecretName::Llm)?.is_some(),
     })
 }
 
@@ -58,28 +69,27 @@ pub fn status(store: &dyn SecretStore) -> AppResult<SecretStatus> {
 pub struct KeychainStore;
 
 impl KeychainStore {
-    fn entry(name: SecretName) -> AppResult<keyring::Entry> {
-        keyring::Entry::new(SERVICE, name.account()).map_err(keychain_err)
+    fn entry(account: &str) -> AppResult<keyring::Entry> {
+        keyring::Entry::new(SERVICE, account).map_err(keychain_err)
     }
 }
 
 impl SecretStore for KeychainStore {
-    fn set(&self, name: SecretName, value: &str) -> AppResult<()> {
-        Self::entry(name)?.set_password(value).map_err(keychain_err)
+    fn set(&self, account: &str, value: &str) -> AppResult<()> {
+        Self::entry(account)?.set_password(value).map_err(keychain_err)
     }
 
-    fn delete(&self, name: SecretName) -> AppResult<()> {
-        match Self::entry(name)?.delete_credential() {
+    fn delete(&self, account: &str) -> AppResult<()> {
+        match Self::entry(account)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(err) => Err(keychain_err(err)),
         }
     }
 
-    fn exists(&self, name: SecretName) -> AppResult<bool> {
-        // Reads the item to learn whether it exists; the value is dropped right here.
-        match Self::entry(name)?.get_password() {
-            Ok(_) => Ok(true),
-            Err(keyring::Error::NoEntry) => Ok(false),
+    fn get(&self, account: &str) -> AppResult<Option<String>> {
+        match Self::entry(account)?.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
             Err(err) => Err(keychain_err(err)),
         }
     }
@@ -105,19 +115,19 @@ pub mod memory {
     use std::sync::Mutex;
 
     #[derive(Default)]
-    pub struct MemoryStore(pub Mutex<HashMap<SecretName, String>>);
+    pub struct MemoryStore(pub Mutex<HashMap<String, String>>);
 
     impl SecretStore for MemoryStore {
-        fn set(&self, name: SecretName, value: &str) -> AppResult<()> {
-            self.0.lock().unwrap().insert(name, value.to_owned());
+        fn set(&self, account: &str, value: &str) -> AppResult<()> {
+            self.0.lock().unwrap().insert(account.to_owned(), value.to_owned());
             Ok(())
         }
-        fn delete(&self, name: SecretName) -> AppResult<()> {
-            self.0.lock().unwrap().remove(&name);
+        fn delete(&self, account: &str) -> AppResult<()> {
+            self.0.lock().unwrap().remove(account);
             Ok(())
         }
-        fn exists(&self, name: SecretName) -> AppResult<bool> {
-            Ok(self.0.lock().unwrap().contains_key(&name))
+        fn get(&self, account: &str) -> AppResult<Option<String>> {
+            Ok(self.0.lock().unwrap().get(account).cloned())
         }
     }
 }
@@ -133,7 +143,7 @@ mod tests {
         assert_eq!(status(&store).unwrap(), SecretStatus { elevenlabs: false, llm: false });
         set_secret(&store, SecretName::Elevenlabs, "  sk_test  ").unwrap();
         assert_eq!(status(&store).unwrap(), SecretStatus { elevenlabs: true, llm: false });
-        assert_eq!(store.0.lock().unwrap()[&SecretName::Elevenlabs], "sk_test");
+        assert_eq!(store.0.lock().unwrap()["elevenlabs"], "sk_test");
         let json = serde_json::to_string(&status(&store).unwrap()).unwrap();
         assert!(!json.contains("sk_test"));
     }

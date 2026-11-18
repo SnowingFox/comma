@@ -10,7 +10,8 @@ use serde_json::{Map, Value};
 use crate::error::{AppError, AppResult};
 
 pub const FILE_NAME: &str = "settings.json";
-pub const MAGPIE_BASE_URL: &str = "http://127.0.0.1:3425/v1";
+pub use comma_voice::llm::MAGPIE_BASE_URL;
+pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8787";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -29,16 +30,8 @@ pub enum ThemePreference {
     Dark,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ReasoningEffort {
-    Off,
-    Low,
-    Medium,
-    High,
-    #[default]
-    Default,
-}
+/// Off maps to `"none"` on the wire, Default omits the field (spec 3.2).
+pub use comma_voice::llm::ReasoningEffort;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -72,13 +65,66 @@ impl Default for LlmSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct LanguageSettings {
+    /// Languages the user speaks, most preferred first. The first is the fallback.
+    pub spoken: Vec<String>,
+    pub auto_detect: bool,
+    /// Translate targets; the first one is used. At most three.
+    pub translate_targets: Vec<String>,
+}
+
+impl Default for LanguageSettings {
+    fn default() -> Self {
+        Self { spoken: Vec::new(), auto_detect: true, translate_targets: Vec::new() }
+    }
+}
+
+/// Accelerators in the `Alt+Shift+Space` form used by the global-shortcut plugin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShortcutSettings {
+    pub dictate: String,
+    pub ask: String,
+    pub translate: String,
+}
+
+impl Default for ShortcutSettings {
+    fn default() -> Self {
+        Self { dictate: "Alt+Space".into(), ask: "Alt+Shift+Space".into(), translate: "Alt+Control+Space".into() }
+    }
+}
+
+/// The Comma server and who is signed in. Tokens live in the Keychain, not here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AccountSettings {
+    pub server_url: String,
+    pub email: String,
+    pub name: String,
+    /// Unix seconds when the stored access token expires; 0 when signed out.
+    pub access_expires_at: u64,
+}
+
+impl Default for AccountSettings {
+    fn default() -> Self {
+        Self { server_url: DEFAULT_SERVER_URL.into(), email: String::new(), name: String::new(), access_expires_at: 0 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub version: u32,
     pub mode: AppMode,
     pub theme: ThemePreference,
     pub onboarding_completed: bool,
+    /// Id of the onboarding step to resume at; empty for the first one.
+    pub onboarding_step: String,
     pub stt: SttSettings,
     pub llm: LlmSettings,
+    pub languages: LanguageSettings,
+    pub shortcuts: ShortcutSettings,
+    pub account: AccountSettings,
 }
 
 impl Default for Settings {
@@ -88,8 +134,12 @@ impl Default for Settings {
             mode: AppMode::default(),
             theme: ThemePreference::default(),
             onboarding_completed: false,
+            onboarding_step: String::new(),
             stt: SttSettings::default(),
             llm: LlmSettings::default(),
+            languages: LanguageSettings::default(),
+            shortcuts: ShortcutSettings::default(),
+            account: AccountSettings::default(),
         }
     }
 }
@@ -106,7 +156,26 @@ impl Settings {
         if self.llm.model.chars().count() > 200 {
             return Err(AppError::invalid("llm.model must be at most 200 characters"));
         }
-        validate_base_url(&self.llm.base_url)
+        if self.onboarding_step.len() > 32 {
+            return Err(AppError::invalid("onboarding_step is too long"));
+        }
+        let langs = &self.languages;
+        if langs.spoken.len() > 10 || langs.translate_targets.len() > 3 {
+            return Err(AppError::invalid("pick at most 10 spoken and 3 target languages"));
+        }
+        if !langs.spoken.iter().chain(&langs.translate_targets).all(|tag| is_language_tag(tag)) {
+            return Err(AppError::invalid("languages must be tags such as en or pt-BR"));
+        }
+        for accel in [&self.shortcuts.dictate, &self.shortcuts.ask, &self.shortcuts.translate] {
+            if accel.is_empty() || accel.len() > 64 || accel.chars().any(char::is_whitespace) {
+                return Err(AppError::invalid("shortcuts must look like Alt+Space"));
+            }
+        }
+        if self.account.email.len() > 320 || self.account.name.len() > 200 {
+            return Err(AppError::invalid("account details are too long"));
+        }
+        validate_url(&self.account.server_url, "account.server_url")?;
+        validate_url(&self.llm.base_url, "llm.base_url")
     }
 
     /// Applies a partial update. Nested objects (`stt`, `llm`) merge one level deep;
@@ -141,16 +210,27 @@ fn merge(target: &mut Map<String, Value>, patch: &Map<String, Value>, prefix: &s
     Ok(())
 }
 
-fn validate_base_url(url: &str) -> AppResult<()> {
+pub fn validate_url(url: &str, field: &str) -> AppResult<()> {
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| AppError::invalid("llm.base_url must start with http:// or https://"))?;
+        .ok_or_else(|| AppError::invalid(format!("{field} must start with http:// or https://")))?;
     let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
     if host.is_empty() || url.len() > 2048 || url.chars().any(char::is_whitespace) {
-        return Err(AppError::invalid("llm.base_url is not a valid URL"));
+        return Err(AppError::invalid(format!("{field} is not a valid URL")));
     }
     Ok(())
+}
+
+/// `en`, `zh-Hans`, `pt-BR`: the same shape as `LanguageTag` in the shared API schemas.
+fn is_language_tag(tag: &str) -> bool {
+    let mut parts = tag.split('-');
+    let primary = parts.next().unwrap_or_default();
+    let subtags: Vec<&str> = parts.collect();
+    (2..=3).contains(&primary.len())
+        && primary.chars().all(|c| c.is_ascii_alphabetic())
+        && subtags.len() <= 3
+        && subtags.iter().all(|s| (2..=8).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
 fn json_err(err: serde_json::Error) -> AppError {
@@ -205,8 +285,12 @@ mod tests {
                 "mode": "local",
                 "theme": "system",
                 "onboarding_completed": false,
+                "onboarding_step": "",
                 "stt": { "model_id": "scribe_v3" },
-                "llm": { "base_url": MAGPIE_BASE_URL, "model": "", "reasoning_effort": "default" }
+                "llm": { "base_url": MAGPIE_BASE_URL, "model": "", "reasoning_effort": "default" },
+                "languages": { "spoken": [], "auto_detect": true, "translate_targets": [] },
+                "shortcuts": { "dictate": "Alt+Space", "ask": "Alt+Shift+Space", "translate": "Alt+Control+Space" },
+                "account": { "server_url": DEFAULT_SERVER_URL, "email": "", "name": "", "access_expires_at": 0 }
             })
         );
     }
@@ -231,6 +315,36 @@ mod tests {
         assert!(s.apply_patch(&json!({ "llm": { "base_url": "https://" } })).is_err());
         assert!(s.apply_patch(&json!({ "stt": { "model_id": "" } })).is_err());
         assert!(s.apply_patch(&json!([])).is_err());
+        assert!(s.apply_patch(&json!({ "languages": { "translate_targets": ["en", "fr", "de", "ja"] } })).is_err());
+        assert!(s.apply_patch(&json!({ "languages": { "spoken": ["english"] } })).is_err());
+        assert!(s.apply_patch(&json!({ "shortcuts": { "dictate": "" } })).is_err());
+        assert!(s.apply_patch(&json!({ "account": { "server_url": "localhost:8787" } })).is_err());
+    }
+
+    #[test]
+    fn languages_and_shortcuts_patch() {
+        let next = Settings::default()
+            .apply_patch(&json!({
+                "languages": { "spoken": ["zh-Hans", "en"], "translate_targets": ["pt-BR"] },
+                "shortcuts": { "dictate": "Control+Shift+D" }
+            }))
+            .unwrap();
+        assert_eq!(next.languages.spoken, ["zh-Hans", "en"]);
+        assert!(next.languages.auto_detect);
+        assert_eq!(next.shortcuts.dictate, "Control+Shift+D");
+        assert_eq!(next.shortcuts.ask, "Alt+Shift+Space");
+    }
+
+    #[test]
+    fn phase_one_files_still_load() {
+        let old = json!({
+            "version": 1, "mode": "local", "theme": "dark", "onboarding_completed": true,
+            "stt": { "model_id": "scribe_v3" },
+            "llm": { "base_url": MAGPIE_BASE_URL, "model": "m", "reasoning_effort": "off" }
+        });
+        let s: Settings = serde_json::from_value(old).unwrap();
+        assert_eq!(s.shortcuts, ShortcutSettings::default());
+        assert_eq!(s.account.server_url, DEFAULT_SERVER_URL);
     }
 
     #[test]

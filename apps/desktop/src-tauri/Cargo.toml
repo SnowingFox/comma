@@ -1,10 +1,10 @@
 [package]
 name = "comma"
-version = "0.1.0"
 description = "Comma: voice keyboard for macOS"
-authors = ["Comma contributors"]
-license = "MIT"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
 
 [lib]
 # The `_lib` suffix keeps the lib name distinct from the bin name (cargo#8519).
@@ -17,20 +17,19 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "macos-private-api", "image-png"] }
 tauri-plugin-opener = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 keyring = { version = "3", features = ["apple-native"] }
+comma-voice.workspace = true
+# The Comma server client; the providers go through comma-voice.
+reqwest.workspace = true
+base64.workspace = true
+tokio-util.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat"] }
 
 [dev-dependencies]
-tempfile = "3"
-
-# https://tauri.app/concept/size/#cargo-configuration
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = 3
-panic = "abort"
-strip = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+wiremock.workspace = true

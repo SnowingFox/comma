@@ -1,4 +1,5 @@
 import type { ComponentType, SVGProps } from "react";
+import { motion } from "motion/react";
 import { toast } from "sonner";
 import type { PermissionState, SettingsPaneKind } from "@comma/shared/ipc";
 import { Badge } from "@multica/ui/components/ui/badge";
@@ -7,6 +8,7 @@ import { Check, Keyboard, Mic } from "@multica/ui/icons";
 import { cn } from "@multica/ui/lib/utils";
 import { invoke } from "../lib/ipc";
 import { usePermissions } from "../lib/queries";
+import { StatusDot } from "./status-dot";
 
 const ROWS: {
   kind: SettingsPaneKind;
@@ -64,14 +66,19 @@ export function PermissionList({ className }: { className?: string }) {
         };
         return (
           <li key={kind} className="flex items-center gap-3 px-4 py-3.5">
-            <span
+            {/* Amber to green with a short spring when the permission arrives (spec 2.4). */}
+            <motion.span
+              key={granted ? "granted" : "waiting"}
+              initial={granted ? { scale: 0.7 } : false}
+              animate={{ scale: 1 }}
+              transition={{ type: "spring", stiffness: 500, damping: 15 }}
               className={cn(
-                "flex size-9 shrink-0 items-center justify-center rounded-lg transition-colors",
-                granted ? "bg-success/12 text-success" : "bg-muted text-muted-foreground",
+                "flex size-9 shrink-0 items-center justify-center rounded-lg transition-colors duration-300",
+                granted ? "bg-success/12 text-success" : "bg-warning/12 text-warning",
               )}
             >
               {granted ? <Check className="size-4.5" /> : <Icon className="size-4.5" />}
-            </span>
+            </motion.span>
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
               <div className="flex items-center gap-2">
                 <span className="text-body font-medium">{title}</span>
@@ -80,7 +87,7 @@ export function PermissionList({ className }: { className?: string }) {
                     variant={granted ? "secondary" : "outline"}
                     className={cn(granted ? "text-success" : "text-muted-foreground")}
                   >
-                    <span className={cn("size-1.5 rounded-full", granted ? "bg-success" : "bg-warning")} />
+                    <StatusDot tone={granted ? "ok" : "warn"} className="-ml-0.5 scale-75" />
                     {STATUS_LABEL[state]}
                   </Badge>
                 ) : null}

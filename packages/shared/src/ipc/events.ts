@@ -56,7 +56,11 @@ export const BarPreviewPayload = z.object({
 });
 export type BarPreviewPayload = z.infer<typeof BarPreviewPayload>;
 
-/** Events, Rust -> frontend (spec 3.3), plus the dev-only bar preview. */
+/** Settings, hub -> onboarding: start over, or open one step (an `OnboardingStep` id). */
+export const OnboardingRestartPayload = z.object({ step: z.string().max(32).optional() });
+export type OnboardingRestartPayload = z.infer<typeof OnboardingRestartPayload>;
+
+/** Events, Rust -> frontend (spec 3.3), plus window-to-window messages (bar preview, onboarding restart). */
 export const events = {
   "shortcut://down": ShortcutPayload,
   "shortcut://up": ShortcutPayload,
@@ -66,6 +70,7 @@ export const events = {
   "run://done": RunDonePayload,
   "run://error": RunErrorPayload,
   "bar://preview": BarPreviewPayload,
+  "onboarding://restart": OnboardingRestartPayload,
 } as const;
 
 export type Events = typeof events;

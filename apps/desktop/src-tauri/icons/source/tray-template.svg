@@ -1,0 +1,5 @@
+<!-- Comma menu bar icon (template). 22 pt square, rendered at 44 px. The template variant is
+     black on transparent so macOS tints it for light and dark menu bars. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="200 230 624 624">
+  <path d="M512 286A152 152 0 0 1 664 438C664 596 592 716 444 790C424 800 404 782 418 764C478 700 512 646 524 589A152 152 0 0 1 360 438A152 152 0 0 1 512 286Z" fill="#000000"/>
+</svg>

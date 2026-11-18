@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["apps/desktop/src-tauri", "crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Comma contributors"]
+
+[workspace.dependencies]
+comma-voice = { path = "crates/comma-voice" }
+# rustls only, no system proxy lookup: local endpoints must never be proxied.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "charset", "json", "multipart"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "time"] }
+tokio-util = "0.7"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+tempfile = "3"
+wiremock = "0.6"
+
+# Profiles apply workspace-wide. https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
