@@ -113,8 +113,8 @@ describe('speech-to-text client helpers', () => {
   })
 
   test('cost: list price per hour, per billed attempt, keyterms +20%', () => {
-    expect(sttCostUsd(3600, 1, false)).toBeCloseTo(0.22)
-    expect(sttCostUsd(3600, 2, true)).toBeCloseTo(0.528)
+    expect(sttCostUsd(3600, 1, false)).toBeCloseTo(0.2)
+    expect(sttCostUsd(3600, 2, true)).toBeCloseTo(0.48)
   })
 
   test('client codes for provider failures', () => {

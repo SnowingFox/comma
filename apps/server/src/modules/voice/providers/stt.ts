@@ -38,8 +38,8 @@ export type SttAttempt = {
   ms: number
 }
 
-/** List price, USD per hour of batch audio; keyterms add 20%. */
-export const STT_USD_PER_HOUR = 0.22
+/** ElevenLabs batch speech-to-text list price, USD per hour of audio (realtime is $0.22); keyterms add 20%. */
+export const STT_USD_PER_HOUR = 0.2
 const KEYTERMS_SURCHARGE = 1.2
 const TIMEOUT_MS = 120_000
 

@@ -1,8 +1,9 @@
 # Comma: product and engineering spec (v0.1)
 
 Comma is an open-source voice keyboard for macOS (Apple Silicon). Hold a shortcut, speak, release: clean,
-well-punctuated text appears at the cursor. Bring your own keys: ElevenLabs for speech-to-text and any
-OpenAI-compatible LLM (a local magpie gateway by default) for the rewrite. There is no Comma server and no account.
+well-punctuated text appears at the cursor. Speech-to-text runs on ElevenLabs and the rewrite on DeepSeek or any
+OpenAI-compatible model. Use your own keys locally, or sign in to a Comma account and use its credits; the Comma
+server is open source and self-hostable (section 5).
 
 This file is the contract between the parts of the codebase. Change it in the same commit as the code that changes
 the behaviour.
