@@ -151,7 +151,56 @@ Events (Rust -> frontend): `shortcut://down|up|cancel { mode }`, `run://stage { 
 - No secrets in logs, errors or the frontend. Keys are write-only from the UI.
 - Release build: `pnpm tauri build --target aarch64-apple-darwin`, ad-hoc signed, `.dmg` output.
 
-## 5. Licensing
+## 5. Server (`apps/server`)
+
+The desktop app works in one of two modes, chosen in onboarding and switchable in Settings:
+
+- **Local**: the app calls ElevenLabs and the LLM directly with the user's own keys (Keychain).
+- **Comma account**: the app signs in to a Comma server, which holds the provider keys, runs the pipeline and meters
+  usage. The server is open source and self-hostable with Docker.
+
+### 5.1 Stack (aligned with the NestJS service in our reference repo)
+
+NestJS 12 on Bun (no build step, `bun src/main.ts`), Drizzle ORM + Postgres via `@nestjs/drizzle`, zod validation on
+every input, typed config with `nest-typed-config` validated by zod, global auth guard with `@Public()` for
+pre-session routes, property injection, Nest `Logger`, `@nestjs/throttler`, `@nestjs/terminus` health. Layout:
+`src/{main.ts,app.module.ts,app.config.ts,migrate.ts}`, `src/entity/<domain>/*.entity.ts`,
+`src/modules/<feature>/{*.module,*.controller,*.service}.ts` with `dto/` and `guards/`, `src/utils/`,
+`drizzle/` migrations, `test/` with `bun test` against a real Postgres. `Dockerfile` (oven/bun alpine) and a
+`docker-compose.yml` with Postgres for local and self-hosted runs. Never log tokens, codes or keys.
+
+### 5.2 Modules and API (all under `/v1`, JSON, errors `{ code, message }`)
+
+| Module | Routes | Notes |
+| --- | --- | --- |
+| health | `GET /v1/health` | public |
+| auth | `POST /v1/auth/register` (email, password, name), `POST /v1/auth/verify-email` (email, code), `POST /v1/auth/login`, `POST /v1/auth/refresh`, `POST /v1/auth/logout`, `POST /v1/auth/password/forgot`, `POST /v1/auth/password/reset` | argon2id via `Bun.password`; 6-digit email codes (hashed, 10 min, 5 attempts); access JWT 15 min (jose, HS256 from config) + rotating refresh token stored hashed, bound to a device; mailer is an interface with SMTP and a dev console implementation |
+| user | `GET /v1/me`, `PATCH /v1/me`, `DELETE /v1/me` | profile, plan, settings that sync (languages, translate targets, context level) |
+| device | `GET /v1/devices`, `DELETE /v1/devices/:id` | one row per signed-in app install |
+| voice | `POST /v1/voice/runs` (multipart: `audio` WAV/Ogg, `meta` JSON: mode, target_language, app name, selected_text, client timings) -> `{ id, raw_text, refined_text, detected_language, timings, usage }`; `GET /v1/voice/runs/:id/stream` SSE variant for streamed refined text | server-side ElevenLabs + LLM with the same pipeline and prompts as local mode (ported from our prototype); size limit 25 MB, 10 min audio |
+| dictionary | `GET/POST /v1/dictionary`, `PATCH/DELETE /v1/dictionary/:id`, `POST /v1/dictionary/import` | used as STT keyterms and in the LLM prompt |
+| history | `GET /v1/history`, `DELETE /v1/history/:id`, `DELETE /v1/history` | stored only when the user enables "Sync history"; otherwise the server keeps metrics without text |
+| usage | `GET /v1/usage/summary?range=`, `GET /v1/usage/daily?range=` | audio seconds, tokens, cost estimate |
+| quota | enforced in voice | per-plan weekly audio minutes (`free` default from config); 402 with `{ code: "quota_exceeded" }` |
+
+Entities: `users`, `email_codes`, `refresh_tokens`, `devices`, `dictionary_terms`, `voice_runs` (metrics; text
+columns nullable and filled only with sync on), `plans`.
+
+### 5.3 Shared contract
+
+`packages/shared` exports zod schemas and TypeScript types for every request and response above and for the desktop
+IPC payloads in section 3.3, so the app and the server can never drift. Both sides import it; no hand-written copies.
+
+## 6. Delivery plan
+
+| Phase | Desktop | Server |
+| --- | --- | --- |
+| 1 Foundations | Multica UI wired in (Tailwind v4, tokens, theme), hub shell with sidebar and empty pages, onboarding window shell, floating bar window, settings store, Keychain, permission status | NestJS skeleton, config, Drizzle + migrations, health, Docker compose, auth (register, verify, login, refresh, logout), user, device |
+| 2 Dictation | shortcuts, mic capture, local pipeline (STT + LLM, language retry, keyterms), paste, bar animations and states, history and usage in SQLite | voice runs, dictionary, usage, quota |
+| 3 Modes and polish | Ask Anything and Translate, onboarding steps with tests, sounds, error states, release build (dmg, arm64) | history sync, password reset, rate limits |
+| Later | typing mode (inline completion, switch between speak and type) | team plans |
+
+## 7. Licensing
 
 Comma's own code is MIT (root `LICENSE`). `packages/multica-ui/` is Multica UI under the Multica License (its own
 `LICENSE` and `NOTICE`, unmodified). Because Comma's interface is derived from Multica UI, the app is a "Multica user
