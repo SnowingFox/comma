@@ -57,18 +57,42 @@ Output in the first of up to 3 target languages from Settings; the bar shows the
 Its own 960 x 640 window, step indicator (`Set up > Try it > Done`), one task per step, an illustration made of our
 own SVG with motion, primary action bottom right, Back bottom left, step transitions slide 24 px and fade (200 ms).
 
+The indicator has three phases (`Set up > Try it > Done`) with a thin progress bar under it that animates its width
+as steps advance. Each phase holds several steps. Every step in Try it has Skip; the whole flow can be rerun from
+Settings and resumes at the last unfinished step if the window is closed.
+
+Set up:
+
 1. Welcome: one-line promise, Get started.
-2. Keys: ElevenLabs key (needs the Speech to Text permission; link to where to create one) and LLM endpoint (magpie
-   detected at `http://127.0.0.1:3425/v1` with a live dot, or custom base URL, key, model). Test buttons show latency.
-3. Permissions: Microphone and Accessibility rows with what each is for, live status (polled every second), and a
-   button that opens the right System Settings pane. Accessibility is needed to paste into other apps and to read the
-   selection for Ask Anything.
-4. Shortcut test: a keyboard illustration lights the configured keys while held; Continue enables after one press;
-   Change opens a shortcut recorder.
-5. Microphone test: level meter, device picker, say a sentence and see the raw transcript.
-6. Try it: a sample field inside the window; hold the shortcut, see the refined text arrive with a highlight sweep.
-   Same for Ask Anything on a sample paragraph.
-7. Done: the three shortcuts, Open Comma.
+2. How Comma runs: choose Local (your own keys) or Comma account (sign in or create an account). Local leads to 3,
+   account leads to sign-in and skips 3.
+3. Keys: ElevenLabs key (needs the Speech to Text permission; link to where to create one) and LLM endpoint. magpie
+   is detected automatically at `http://127.0.0.1:3425/v1` (live status dot, model count, pick a model from its list);
+   otherwise custom base URL, key and model. Each provider has Test with inline latency and a precise error.
+4. Permissions: Microphone and Accessibility rows with what each is for, live status (polled every second), and a
+   button that opens the right System Settings pane; rows turn green as they are granted. A short "Where your data
+   goes" panel next to them, with two tabs (Local, Comma account) in plain words.
+5. Languages: chips for the languages you speak (auto-detect on by default); the first one is the fallback when
+   detection is unsure.
+6. Microphone test: level meter, device picker, "Say a sentence"; the raw transcript appears under the meter.
+7. Shortcut test (Dictate): a keyboard illustration lights the configured keys while held ("Do the keys light up?");
+   Yes enables after one press; No opens the shortcut recorder.
+
+Try it (each mode: shortcut test, a one-line intro, a sample to try):
+
+8. Dictate: a sample chat with an empty message box; hold the shortcut, speak, release; the refined text lands in the
+   box with a highlight sweep, with a toggle to compare it with the raw transcript.
+9. Ask Anything: a sample paragraph; select it and ask for a change ("make it shorter"), the result replaces it; then
+   ask a question with nothing selected and see the answer card.
+10. Translate: pick up to three target languages, then dictate into a sample box and see the translation.
+
+Done:
+
+11. The three shortcuts as keycaps, one closing line, Open Comma.
+
+Motion: step content slides 24 px and fades (200 ms ease-out); keycaps press down (scale 0.96, accent fill, 120 ms);
+status rows tick from amber to green with a short spring; inserted text gets a left-to-right highlight sweep (600 ms);
+everything honours reduced motion. Illustrations, copy and sounds are Comma's own.
 
 ### 2.5 Hub window
 
