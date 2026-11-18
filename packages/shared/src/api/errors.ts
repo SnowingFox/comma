@@ -24,14 +24,30 @@ export const ErrorCode = z.enum([
   'resend_cooldown',
   // Refresh tokens.
   'invalid_refresh_token',
-  'refresh_token_reused'
+  'refresh_token_reused',
+  // Voice runs.
+  'invalid_audio',
+  'audio_too_large',
+  'audio_too_long',
+  'no_speech',
+  'quota_exceeded',
+  'run_in_progress',
+  'stt_failed',
+  'llm_failed',
+  'provider_unavailable',
+  'provider_not_configured',
+  // Dictionary.
+  'term_exists',
+  'dictionary_full'
 ])
 export type ErrorCode = z.infer<typeof ErrorCode>
 
 /** Body of every non-2xx response. `message` is for humans and logs; branch on `code`. */
 export const ApiError = z.object({
   code: ErrorCode,
-  message: z.string()
+  message: z.string(),
+  /** With `quota_exceeded`: ISO 8601 start of the next credit period. */
+  resets_at: z.iso.datetime().optional()
 })
 export type ApiError = z.infer<typeof ApiError>
 

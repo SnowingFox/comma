@@ -31,6 +31,37 @@ export class MailerConfig {
   smtpUrl?: string
 }
 
+export const LLM_PROVIDERS = ['openai-compatible', 'deepseek'] as const
+export type LlmProvider = (typeof LLM_PROVIDERS)[number]
+
+export const REASONING_EFFORTS = ['off', 'low', 'medium', 'high', 'default'] as const
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number]
+
+/** Comma's own speech-to-text account. Voice runs answer 503 `provider_not_configured` without a key. */
+export class ElevenLabsConfig {
+  apiKey?: string
+  baseUrl: string
+  model: string
+}
+
+/**
+ * Comma's own LLM for the rewrite. Voice runs need a key and a model, and a base URL for `openai-compatible`
+ * (DeepSeek defaults to its official API).
+ */
+export class LlmConfig {
+  provider: LlmProvider
+  baseUrl?: string
+  apiKey?: string
+  model?: string
+  /** `off` sends `reasoning_effort: "none"`, `default` omits the field. */
+  reasoningEffort: ReasoningEffort
+}
+
+/** Weekly allowance of Comma credits per plan, in seconds of audio. */
+export class QuotaConfig {
+  freeWeeklySeconds: number
+}
+
 /** Loaded by nest-typed-config from `SECTION__KEY` env vars; every section is injectable by class. */
 export class AppConfig {
   server: ServerConfig
@@ -38,6 +69,9 @@ export class AppConfig {
   jwt: JwtConfig
   auth: AuthConfig
   mailer: MailerConfig
+  elevenlabs: ElevenLabsConfig
+  llm: LlmConfig
+  quota: QuotaConfig
 }
 
 const flag = z
@@ -69,6 +103,25 @@ const rawSchema = z
         from: z.string().min(3).default('Comma <no-reply@localhost>'),
         smtpUrl: optionalString.pipe(z.url({ protocol: /^smtps?$/ }).optional())
       })
+      .prefault({}),
+    elevenlabs: z
+      .object({
+        apiKey: optionalString,
+        baseUrl: z.url({ protocol: /^https?$/ }).default('https://api.elevenlabs.io'),
+        model: z.string().min(1).default('scribe_v3')
+      })
+      .prefault({}),
+    llm: z
+      .object({
+        provider: z.enum(LLM_PROVIDERS).default('openai-compatible'),
+        baseUrl: optionalString.pipe(z.url({ protocol: /^https?$/ }).optional()),
+        apiKey: optionalString,
+        model: optionalString,
+        reasoningEffort: z.enum(REASONING_EFFORTS).default('off')
+      })
+      .prefault({}),
+    quota: z
+      .object({ freeWeeklySeconds: z.coerce.number().int().min(0).default(30 * 60) })
       .prefault({})
   })
   .superRefine((raw, ctx) => {
@@ -96,12 +149,15 @@ export function validateConfig(raw: Record<string, unknown>): AppConfig {
   if (!parsed.success) {
     throw new Error(`Invalid configuration:\n${z.prettifyError(parsed.error)}`)
   }
-  const { nodeEnv, server, database, jwt, auth, mailer } = parsed.data
+  const { nodeEnv, server, database, jwt, auth, mailer, elevenlabs, llm, quota } = parsed.data
   return Object.assign(new AppConfig(), {
     server: Object.assign(new ServerConfig(), { production: nodeEnv === 'production', ...server }),
     database: Object.assign(new DatabaseConfig(), database),
     jwt: Object.assign(new JwtConfig(), jwt),
     auth: Object.assign(new AuthConfig(), auth),
-    mailer: Object.assign(new MailerConfig(), mailer)
+    mailer: Object.assign(new MailerConfig(), mailer),
+    elevenlabs: Object.assign(new ElevenLabsConfig(), elevenlabs),
+    llm: Object.assign(new LlmConfig(), llm),
+    quota: Object.assign(new QuotaConfig(), quota)
   })
 }

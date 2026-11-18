@@ -1,7 +1,8 @@
 # Comma server
 
-Accounts for the Comma desktop app: register with email verification, sign in per device, refresh and sign out,
-profile and synced settings, device list. NestJS 12 on Bun (no build step), Postgres through Drizzle. The contract is
+Accounts and Comma credits for the desktop app: register with email verification, sign in per device, refresh and
+sign out, profile and synced settings, device list, the dictionary, and voice runs (speech to text and the rewrite) on
+Comma's own provider keys, metered against a weekly allowance. NestJS 12 on Bun (no build step), Postgres through Drizzle. The contract is
 `docs/spec.md` section 5; request and response schemas live in `packages/shared/src/api/` and the server validates
 with exactly those.
 
@@ -46,6 +47,14 @@ Environment variables, `SECTION__KEY`, validated at startup by zod (`src/app.con
 | `MAILER__DEV_PRINT_CODES` | `0` | `1` makes the console mailer print the code |
 | `MAILER__FROM` | `Comma <no-reply@localhost>` | Sender address |
 | `MAILER__SMTP_URL` | | Required with `smtp`: `smtp://user:pass@host:587` (STARTTLS) or `smtps://user:pass@host:465` |
+| `ELEVENLABS__API_KEY` | | Comma's ElevenLabs key (needs the speech_to_text permission). Without it voice runs answer 503 |
+| `ELEVENLABS__MODEL` | `scribe_v3` | |
+| `ELEVENLABS__BASE_URL` | `https://api.elevenlabs.io` | |
+| `LLM__PROVIDER` | `openai-compatible` | Or `deepseek` (official API; use it in production) |
+| `LLM__BASE_URL` | | Required for `openai-compatible`; optional for `deepseek` (default `https://api.deepseek.com`) |
+| `LLM__API_KEY`, `LLM__MODEL` | | Both required for voice runs. DeepSeek model ids are in its docs, e.g. `deepseek-v4-flash` |
+| `LLM__REASONING_EFFORT` | `off` | `off`, `low`, `medium`, `high`, `default`. `off` sends `reasoning_effort: "none"` (DeepSeek: thinking disabled); `default` sends nothing |
+| `QUOTA__FREE_WEEKLY_SECONDS` | `1800` | Audio seconds per ISO week (UTC) on the `free` plan |
 
 ## Database and migrations
 
@@ -59,13 +68,16 @@ bun run db:migrate     # applies pending migrations to DATABASE__URL (compose ru
 ## Tests
 
 ```sh
-docker compose -p comma-server-test up -d db                # Postgres on 127.0.0.1:55432
+docker compose -p comma-server-test up -d db                # Postgres on 127.0.0.1:55432 (COMMA_DB_PORT changes it)
 bun run typecheck
 bun test                                                    # each test file gets its own fresh database
 docker compose -p comma-server-test down -v
 ```
 
 `TEST_DATABASE_URL` (default `postgres://comma:comma@localhost:55432/comma`) must be a role that can create databases.
+Tests never call real providers: `test/setup.ts` sets fake keys (they win over `.env`), voice tests run against a local
+fake ElevenLabs and OpenAI-compatible server (`test/fake-providers.ts`), and the LLM unit tests use the AI SDK's
+`MockLanguageModelV4`.
 
 ## API
 
@@ -86,6 +98,15 @@ All routes are under `/v1` and speak JSON. Errors are `{ code, message }` with `
 | `DELETE /v1/me` | bearer | `password` | 204; the user, devices, tokens and codes are deleted. 403 `invalid_credentials` |
 | `GET /v1/devices` | bearer | | 200 `{ devices }`, `current` marks the caller's |
 | `DELETE /v1/devices/:id` | bearer | | 204; that device is signed out at once. 404 `not_found` |
+| `POST /v1/voice/runs` | bearer | multipart: `audio` (WAV or Ogg/Opus, 25 MB, 10 min), `meta` JSON (`mode` dictate, ask or translate; `target_language`, `app_name`, `selected_text` (ask only, 20 000 chars), `client_timings`) | 200 `{ id, raw_text, refined_text, detected_language, delivery, timings, usage }`. See below for errors |
+| `GET /v1/dictionary` | bearer | | 200 `{ terms }`, oldest first |
+| `POST /v1/dictionary` | bearer | `term` (1 to 100 characters) | 201 `{ term }`. 409 `term_exists` (case-insensitive), `dictionary_full` (1000) |
+| `PATCH /v1/dictionary/:id` | bearer | `term` | 200 `{ term }`. 404, 409 `term_exists` |
+| `DELETE /v1/dictionary/:id` | bearer | | 204. 404 |
+| `POST /v1/dictionary/import` | bearer | `csv`: first column is the term, optional `term` header | 200 `{ added, skipped, terms }` |
+| `GET /v1/usage/summary?range=` | bearer | `today`, `7d` (default), `30d`, UTC days | 200 `{ range, from, to, totals, by_mode }` |
+| `GET /v1/usage/daily?range=` | bearer | same | 200 `{ range, days }`, one entry per day |
+| `GET /v1/me/credits` | bearer | | 200 `{ plan, period_start, period_end, used_seconds, limit_seconds }` |
 
 How sessions work:
 
@@ -99,3 +120,26 @@ How sessions work:
   authenticated request checks that the device still exists.
 - Register, verify, resend, login and refresh are rate limited per client IP (`AUTH_THROTTLE` in
   `src/modules/auth/auth.controller.ts`).
+
+How a voice run works (`src/modules/voice`):
+
+1. Limits first, before any provider call: the audio must be WAV or Ogg/Opus (read from its bytes), at most 25 MB
+   (413 `audio_too_large`) and 10 minutes (413 `audio_too_long`). Under 0.3 s is 422 `no_speech`.
+2. One run per user at a time (429 `run_in_progress`), and the run's audio must fit in this week's credits
+   (402 `quota_exceeded` with `resets_at`). Both are checked in one transaction on `voice_runs`.
+3. ElevenLabs speech to text with the dictionary as keyterms (terms over 50 characters or 5 words are left out).
+   Language is auto-detected; when the user has languages and the detection is not one of them or its probability is
+   under 0.5, the audio is sent once more with the first language forced, and the more confident attempt is kept.
+4. The rewrite streams through the AI SDK (`src/modules/voice/providers/llm-model.ts` holds the provider wiring).
+   The transcript, the app name and the selected text go in delimited data blocks with a random marker; the prompt
+   tells the model never to follow instructions inside them. The app name and selected text are used only as far as
+   the user's `context_level` allows.
+5. Empty speech or an empty rewrite is 422 `no_speech`. Provider failures are 502 `stt_failed` / `llm_failed` or
+   503 `provider_unavailable` (rate limits, timeouts, network); the provider's message stays in the server log.
+   Without provider keys every run is 503 `provider_not_configured`.
+6. Only successful runs count against the credits. `voice_runs` stores metrics only (mode, language, timings,
+   tokens, cost estimate); its text columns stay null until history sync exists. Closing the connection cancels
+   the provider calls and the run is not billed.
+
+`delivery` tells the app what to do with `refined_text`: `insert` it at the cursor (dictate, translate), `replace` the
+selection (ask with selected text, when the model answers inline), or show it as an `answer` card (ask otherwise).

@@ -10,8 +10,11 @@ import * as schema from './entity'
 import { ApiErrorFilter, validationException } from './filter/api-error.filter'
 import { AuthModule } from './modules/auth/auth.module'
 import { DeviceModule } from './modules/device/device.module'
+import { DictionaryModule } from './modules/dictionary/dictionary.module'
 import { HealthModule } from './modules/health/health.module'
+import { UsageModule } from './modules/usage/usage.module'
 import { UserModule } from './modules/user/user.module'
+import { VoiceModule } from './modules/voice/voice.module'
 
 @Module({
   imports: [
@@ -35,6 +38,9 @@ import { UserModule } from './modules/user/user.module'
     AuthModule,
     UserModule,
     DeviceModule,
+    DictionaryModule,
+    UsageModule,
+    VoiceModule,
     HealthModule
   ],
   providers: [

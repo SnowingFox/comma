@@ -16,7 +16,12 @@ describe('user', () => {
     const session = await signUp(t, 'ada@example.com')
     const me = MeResponse.parse((await t.http().get('/v1/me').set(bearer(session.access_token)).expect(200)).body)
     expect(me.user).toEqual({ ...session.user })
-    expect(me.user.settings).toEqual({ languages: [], translate_targets: [], context_level: 'app_and_selection' })
+    expect(me.user.settings).toEqual({
+      languages: [],
+      translate_targets: [],
+      context_level: 'app_and_selection',
+      provider_mode: 'own'
+    })
   })
 
   test('PATCH /v1/me updates the name and merges settings', async () => {
