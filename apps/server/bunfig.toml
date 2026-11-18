@@ -1,0 +1,7 @@
+[install]
+# 3-day delay before a newly published package version is installed (supply-chain safety).
+minimumReleaseAge = 259200
+
+[test]
+root = "./test"
+preload = ["./test/setup.ts"]
