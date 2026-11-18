@@ -2,6 +2,9 @@
   "name": "@comma/shared",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./ipc": "./src/ipc/index.ts"
+  },
   "dependencies": { "zod": "^4" }
 }
