@@ -12,14 +12,15 @@ the behaviour.
 | Area | In v0.1 | Not in v0.1 |
 |---|---|---|
 | Modes | Dictate, Ask Anything (instruction on the selected text, or a question), Translate | Auto-learning dictionary |
-| Shortcuts | Registered key combinations (hold-to-talk and tap-to-toggle), Esc to cancel, configurable | Single modifier keys such as Fn alone |
+| Shortcuts | Fn-based defaults (Fn, Fn+Space, Fn+Left Shift), hold-to-talk, double press for hands-free, Esc to cancel, all configurable; ordinary key combinations as the fallback | Per-app shortcuts |
 | Output | Paste at the cursor of the focused app (clipboard is restored afterwards); copy-only fallback | Rich text |
 | Context | Only on a run the user starts: focused app name, and for Ask Anything the selected text. Off switch in Settings | Reading other text on screen |
 | Data | Local history and usage in SQLite, dictionary | Sync, accounts |
 | Platform | macOS 13+, arm64 | Intel, Windows, Linux |
 
-Privacy rules: no global keyboard monitoring (only the configured shortcuts are registered with the OS); audio is
-recorded only between shortcut press and release and is not stored unless "Keep audio" is on; nothing is read from
+Privacy rules: to detect Fn, Comma watches only the state of the modifier keys and the configured trigger keys, with
+the macOS Input Monitoring permission that onboarding asks for and explains; no other key is ever recorded, stored or
+sent, and without the permission Comma falls back to ordinary registered shortcuts; audio is recorded only between shortcut press and release and is not stored unless "Keep audio" is on; nothing is read from
 other apps except what the table above lists, and only during a run; API keys live in the macOS Keychain.
 
 ## 2. Interaction design
@@ -31,10 +32,10 @@ product.**
 ### 2.1 Dictation loop (floating bar)
 
 1. Idle: hidden, or a 6 px dot at the bottom centre when "Show bar when idle" is on.
-2. Shortcut down (Dictate, default `Alt+Space` held): a soft synthesised tick, the bar springs from the dot into a
+2. Shortcut down (Dictate, default `Fn` held): a soft synthesised tick, the bar springs from the dot into a
    pill (~220 ms). Recording starts at once.
 3. Recording: live waveform from the mic level (10 bars, smoothed), mode icon, timer after 3 s. Release ends it.
-   Pressing the shortcut twice within 300 ms locks hands-free mode (lock icon); the next press ends it. Esc cancels
+   Pressing Fn twice within 300 ms starts hands-free mode (lock icon); the next press ends it. Esc cancels
    (short shake, fade out, nothing inserted).
 4. Processing: the waveform folds into a shimmering line; after 2 s a quiet "Still working" label fades in.
 5. Done: text is pasted, a check shows for 600 ms, the bar shrinks back. A second, higher tick plays.
@@ -43,14 +44,26 @@ product.**
 
 The bar is a transparent, always-on-top, non-focusable window on the screen that has the mouse.
 
-### 2.2 Ask Anything (default `Alt+Shift+Space`, tap to start, tap to stop)
+### 2.2 Ask Anything (default `Fn+Space`, press to start, press to stop)
 
 With selected text, the instruction applies to it and the result replaces the selection. Without a selection the
 answer shows in a floating card above the bar (Copy, Insert, Esc closes); it is never auto-inserted.
 
-### 2.3 Translate (default `Alt+Ctrl+Space`, held)
+### 2.3 Translate (default `Fn+Left Shift`, held)
 
 Output in the first of up to 3 target languages from Settings; the bar shows the language code while recording.
+
+### 2.3.1 Bar hints
+
+Short, dismissible hints next to the bar teach the shortcuts while they are used (each shown at most a few times, then
+never again; all off with one switch in Settings):
+
+- Ask Anything held like Dictate: "No need to hold. Press once, speak, press again."
+- After a few long dictations: "Press Fn twice to keep talking hands-free."
+- Speaking into a field Comma cannot paste into: the text is copied, with "Copied. Paste it with Cmd+V."
+- A clearly better microphone is connected: "Switch to <device>?" with Switch and Not now.
+- Permission lost or signed out: one line with a button that opens the fix.
+- Right-click on the bar opens a small menu: copy last result, output language, open Comma.
 
 ### 2.4 Onboarding (first launch; can be rerun from Settings)
 
@@ -131,8 +144,9 @@ comma/
 
 ### 3.2 Rust core (Tauri 2)
 
-- Shortcuts: `tauri-plugin-global-shortcut` (pressed/released events) for the three configured combinations and Esc
-  (Esc is registered only while recording).
+- Shortcuts: a modifier-state listener for Fn-based bindings (needs Input Monitoring; reads only modifier flags and the
+  configured trigger keys, nothing else is kept), and `tauri-plugin-global-shortcut` for ordinary combinations and as
+  the fallback. Esc is listened for only while recording.
 - Windows: `bar` (transparent, decorations off, always on top, skip taskbar, non-focusable, positioned per monitor),
   `onboarding`, `hub`. Tray icon with Open Comma, mode toggles, Quit.
 - Pipeline (`pipeline.rs`, `stt.rs`, `llm.rs`, `prompts.rs`): ElevenLabs `POST /v1/speech-to-text` multipart
