@@ -39,4 +39,24 @@ describe('config', () => {
     expect(() => validateConfig({ ...base, mailer: { driver: 'smtp' } })).toThrow(/MAILER__DRIVER=smtp/)
     expect(() => validateConfig({ ...base, mailer: { driver: 'smtp', smtpUrl: 'https://x' } })).toThrow()
   })
+
+  test('providers and quota: defaults, reasoning effort, empty values are unset', () => {
+    const config = validateConfig(base)
+    expect(config.elevenlabs).toMatchObject({ apiKey: undefined, baseUrl: 'https://api.elevenlabs.io', model: 'scribe_v3' })
+    expect(config.llm).toMatchObject({ provider: 'openai-compatible', baseUrl: undefined, apiKey: undefined, reasoningEffort: 'off' })
+    expect(config.quota.freeWeeklySeconds).toBe(1800)
+    const set = validateConfig({
+      ...base,
+      elevenlabs: { apiKey: 'el', model: 'scribe_v2' },
+      llm: { provider: 'deepseek', baseUrl: '', apiKey: 'k', model: 'deepseek-v4-flash', reasoningEffort: 'default' },
+      quota: { freeWeeklySeconds: '600' }
+    })
+    expect(set.llm).toMatchObject({ provider: 'deepseek', baseUrl: undefined, reasoningEffort: 'default' })
+    expect(set.quota.freeWeeklySeconds).toBe(600)
+    expect(configKey('LLM__REASONING_EFFORT')).toBe('llm__reasoningEffort')
+    expect(configKey('QUOTA__FREE_WEEKLY_SECONDS')).toBe('quota__freeWeeklySeconds')
+    expect(() => validateConfig({ ...base, llm: { reasoningEffort: 'max' } })).toThrow(/reasoningEffort/)
+    expect(() => validateConfig({ ...base, llm: { provider: 'openai' } })).toThrow(/provider/)
+    expect(() => validateConfig({ ...base, llm: { baseUrl: 'ftp://x' } })).toThrow()
+  })
 })

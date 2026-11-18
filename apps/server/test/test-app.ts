@@ -8,7 +8,8 @@ import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { Client, Pool } from 'pg'
 import request from 'supertest'
-import { DatabaseConfig } from '@/app.config'
+import { dotenvLoader } from 'nest-typed-config'
+import { configKey, DatabaseConfig, ElevenLabsConfig, LlmConfig, QuotaConfig, validateConfig } from '@/app.config'
 import { AppModule } from '@/app.module'
 import { configureApp } from '@/main'
 import { Mailer } from '@/modules/auth/mailer'
@@ -70,7 +71,14 @@ const unlimited = {
   increment: async () => ({ totalHits: 1, timeToExpire: 60, isBlocked: false, timeToBlockExpire: 0 })
 }
 
-export async function createTestApp(options: { throttle?: boolean } = {}): Promise<TestApp> {
+export type TestAppOptions = {
+  throttle?: boolean
+  elevenlabs?: Partial<ElevenLabsConfig>
+  llm?: Partial<LlmConfig>
+  quota?: Partial<QuotaConfig>
+}
+
+export async function createTestApp(options: TestAppOptions = {}): Promise<TestApp> {
   const database = await createTestDatabase()
   const outbox = new Outbox()
   let builder = Test.createTestingModule({ imports: [AppModule] })
@@ -78,6 +86,15 @@ export async function createTestApp(options: { throttle?: boolean } = {}): Promi
     .useValue(Object.assign(new DatabaseConfig(), { url: database.url }))
     .overrideProvider(Mailer)
     .useValue(outbox)
+  // Fresh copies of the test environment's config (setup.ts; the .env file is ignored) with this app's patches.
+  const loaded = validateConfig(dotenvLoader({ separator: '__', keyTransformer: configKey, ignoreEnvFile: true })())
+  builder = builder
+    .overrideProvider(ElevenLabsConfig)
+    .useValue(Object.assign(new ElevenLabsConfig(), loaded.elevenlabs, options.elevenlabs))
+    .overrideProvider(LlmConfig)
+    .useValue(Object.assign(new LlmConfig(), loaded.llm, options.llm))
+    .overrideProvider(QuotaConfig)
+    .useValue(Object.assign(new QuotaConfig(), loaded.quota, options.quota))
   if (!options.throttle) {
     builder = builder.overrideProvider(ThrottlerStorage).useValue(unlimited)
   }

@@ -24,8 +24,8 @@ const STATUS_CODES: Partial<Record<number, ErrorCode>> = {
 
 /** An `HttpException` whose body is already an `ApiError`. */
 export class ApiException extends HttpException {
-  constructor(status: HttpStatus, code: ErrorCode, message: string) {
-    super({ code, message } satisfies ApiError, status)
+  constructor(status: HttpStatus, code: ErrorCode, message: string, extra: Omit<ApiError, 'code' | 'message'> = {}) {
+    super({ code, message, ...extra } satisfies ApiError, status)
   }
 }
 
@@ -80,6 +80,7 @@ export class ApiErrorFilter implements ExceptionFilter {
       : typeof fields.message === 'string'
         ? fields.message
         : exception.message
-    return [status, { code, message }]
+    const resetsAt = typeof fields.resets_at === 'string' ? { resets_at: fields.resets_at } : {}
+    return [status, { code, message, ...resetsAt }]
   }
 }
