@@ -1,13 +1,16 @@
-import type { ComponentType, SVGProps } from "react";
+import { useState, type ComponentType, type SVGProps } from "react";
 import { motion } from "motion/react";
 import { toast } from "sonner";
 import type { PermissionState, PermissionsStatus } from "@comma/shared/ipc";
 import { Badge } from "@multica/ui/components/ui/badge";
 import { Button } from "@multica/ui/components/ui/button";
-import { Check, Keyboard, Mic, Type } from "@multica/ui/icons";
+import { Check, Keyboard, Mic, RotateCw, Type } from "@multica/ui/icons";
 import { cn } from "@multica/ui/lib/utils";
-import { invoke } from "../lib/ipc";
-import { usePermissions } from "../lib/queries";
+import { errorMessage, invoke } from "../lib/ipc";
+import { inputMonitoringState, useRecheckPermission } from "../lib/permissions";
+import { usePermissions, useSettings } from "../lib/queries";
+import { useShortcutsStatus } from "../lib/shortcut-events";
+import { isFnAccelerator } from "@comma/shared/ipc";
 import { allowInputMonitoring } from "./shortcut-notes";
 import { StatusDot } from "./status-dot";
 
@@ -57,8 +60,18 @@ async function requestMicrophone() {
   }
 }
 
-export function PermissionList({ className }: { className?: string }) {
+/**
+ * `recheck` adds Check again to each row, and for Input Monitoring says when a restart is needed
+ * (macOS applies that permission to a new process).
+ */
+export function PermissionList({ className, recheck = false }: { className?: string; recheck?: boolean }) {
   const { data } = usePermissions();
+  const status = useShortcutsStatus().data;
+  const shortcuts = useSettings().data?.shortcuts;
+  const usesFn = !!shortcuts && [shortcuts.dictate, shortcuts.ask, shortcuts.translate].some(isFnAccelerator);
+  const im = inputMonitoringState(status, usesFn);
+  const check = useRecheckPermission();
+  const [checking, setChecking] = useState<string | null>(null);
 
   return (
     <ul className={cn("flex flex-col divide-y divide-border overflow-hidden rounded-card border border-surface-border bg-surface", className)}>
@@ -102,7 +115,42 @@ export function PermissionList({ className }: { className?: string }) {
                 ) : null}
               </div>
               <p className="text-label text-muted-foreground">{description}</p>
+              {recheck && kind === "input_monitoring" && !granted ? (
+                <p className="text-label text-muted-foreground">
+                  Turned it on already? macOS lets Comma use it after a restart.{" "}
+                  <button type="button" className="font-medium text-foreground underline underline-offset-2" onClick={() => void invoke("app_restart").catch((e: unknown) => toast.error(errorMessage(e)))}>
+                    Restart Comma
+                  </button>
+                </p>
+              ) : null}
+              {recheck && kind === "input_monitoring" && granted && im === "missing" ? (
+                <p className="text-label text-warning">Allowed, but the Fn listener has not picked it up. Check again, or restart Comma.</p>
+              ) : null}
+              {recheck && kind === "input_monitoring" && im === "restart" ? (
+                <p className="text-label text-warning">
+                  Allowed, but this copy of Comma can't use it yet.{" "}
+                  <button type="button" className="font-medium underline underline-offset-2" onClick={() => void invoke("app_restart").catch((e: unknown) => toast.error(errorMessage(e)))}>
+                    Restart Comma
+                  </button>
+                </p>
+              ) : null}
             </div>
+            {recheck ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={checking === kind}
+                onClick={() => {
+                  setChecking(kind);
+                  void check(kind)
+                    .catch((e: unknown) => toast.error(errorMessage(e)))
+                    .finally(() => setChecking(null));
+                }}
+              >
+                <RotateCw className={cn(checking === kind && "animate-spin")} />
+                Check again
+              </Button>
+            ) : null}
             {granted ? null : (
               <Button variant="outline" size="sm" onClick={onClick} disabled={state === "restricted"}>
                 {(kind === "microphone" && state === "not_determined") || kind === "input_monitoring" ? "Allow" : "Open Settings"}

@@ -39,8 +39,9 @@ function Note({ icon: Icon, tone, children, action, className }: {
 }
 
 /**
- * One line when an Fn shortcut cannot work yet because Input Monitoring is missing, with the
- * fallback that works meanwhile and a button that fixes it. Nothing otherwise.
+ * One line when an Fn shortcut cannot work yet because Input Monitoring is missing (or allowed but
+ * not applied to this process yet), with the fallback that works meanwhile and the fix. Nothing
+ * otherwise.
  */
 export function InputMonitoringNote({ className }: { className?: string }) {
   const qc = useQueryClient();
@@ -50,27 +51,43 @@ export function InputMonitoringNote({ className }: { className?: string }) {
   const usesFn = isFnAccelerator(shortcuts.dictate) || isFnAccelerator(shortcuts.ask) || isFnAccelerator(shortcuts.translate);
   if (!usesFn) return null;
   const fallback = status.active.dictate;
+  const meanwhile = fallback ? ` Until then, use ${acceleratorWords(fallback)}.` : "";
+  const restart = (
+    <Button size="sm" variant={status.restart_required ? "outline" : "ghost"} onClick={() => void invoke("app_restart").catch((e: unknown) => toast.error(errorMessage(e)))}>
+      Restart Comma
+    </Button>
+  );
+  if (status.restart_required) {
+    return (
+      <Note icon={CircleAlert} tone="warn" className={className} action={restart}>
+        Input Monitoring is allowed, but Comma needs a restart to use Fn.{meanwhile}
+      </Note>
+    );
+  }
   return (
     <Note
       icon={CircleAlert}
       tone="warn"
       className={className}
       action={
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() =>
-            void allowInputMonitoring()
-              .then(() => qc.invalidateQueries({ queryKey: ["shortcuts_status"] }))
-              .then(() => qc.invalidateQueries({ queryKey: queryKeys.permissions }))
-              .catch((e: unknown) => toast.error(errorMessage(e)))
-          }
-        >
-          Allow
-        </Button>
+        <div className="flex items-center gap-1">
+          {restart}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              void allowInputMonitoring()
+                .then(() => qc.invalidateQueries({ queryKey: ["shortcuts_status"] }))
+                .then(() => qc.invalidateQueries({ queryKey: queryKeys.permissions }))
+                .catch((e: unknown) => toast.error(errorMessage(e)))
+            }
+          >
+            Allow
+          </Button>
+        </div>
       }
     >
-      Fn shortcuts need Input Monitoring.{fallback ? ` Until you allow it, use ${acceleratorWords(fallback)}.` : ""}
+      Fn shortcuts need Input Monitoring.{meanwhile} Already allowed? Restart Comma.
     </Note>
   );
 }

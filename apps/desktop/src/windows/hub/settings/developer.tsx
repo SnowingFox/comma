@@ -65,7 +65,7 @@ export function DeveloperSection() {
           )}
         >
           <div className="h-16 w-[360px]">
-            <BarView {...preview} message={preview.state === "error" ? SAMPLE_ERROR : undefined} />
+            <BarView state={preview.state} mode={preview.mode} message={preview.state === "error" ? SAMPLE_ERROR : undefined} />
           </div>
         </div>
         <Row label="State">
