@@ -110,8 +110,8 @@ export function ShortcutsTab() {
               </Status>
             </Row>
             {status.restart_required ? <Note tone="bad">Allowed in System Settings, but the tap does not start. Relaunch Comma.</Note> : null}
-            {status.tap === "running" && !status.input_monitoring ? (
-              <Note tone="warn">macOS created the tap without Input Monitoring; it may receive nothing. The fallbacks are registered too.</Note>
+            {status.tap === "running" && !status.input_monitoring && !status.tap_keys ? (
+              <Note tone="warn">macOS created the tap without Input Monitoring: it gets modifier changes (Fn alone) at most, no key presses. The fallbacks are registered too.</Note>
             ) : null}
             {status.errors.map((e) => (
               <Note key={e.mode} tone="bad">
