@@ -1,3 +1,4 @@
+// Modified by the Comma project: base compiler options inlined (see LOCAL_CHANGES.md). Original: multica-ai/multica packages/ui.
 {
   "compilerOptions": {
     "target": "ESNext",

@@ -24,8 +24,8 @@ other apps except what the table above lists, and only during a run; API keys li
 
 ## 2. Interaction design
 
-Typeless is the reference for feel and polish. Comma reproduces the behaviour with its own visual language, copy,
-icons, sounds and animations. **Never copy any asset, text, illustration, video or sound from Typeless or any other
+The bar for feel and polish is the best dictation apps on the market. Comma designs its own visual language, copy,
+icons, sounds and animations. **Never copy any asset, text, illustration, video, sound or code from another
 product.**
 
 ### 2.1 Dictation loop (floating bar)
