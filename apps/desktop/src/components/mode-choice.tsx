@@ -14,7 +14,7 @@ const MODES: { value: AppMode; title: string; description: string; icon: typeof 
   {
     value: "account",
     title: "Comma account",
-    description: "A Comma server holds the keys and runs the pipeline. Sign-in arrives in a later version.",
+    description: "A Comma server holds the keys and runs each request. Sign in below.",
     icon: UserRound,
   },
 ];

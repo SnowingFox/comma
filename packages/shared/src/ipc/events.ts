@@ -56,8 +56,8 @@ export const BarPreviewPayload = z.object({
 });
 export type BarPreviewPayload = z.infer<typeof BarPreviewPayload>;
 
-/** Settings > Run setup again, hub -> onboarding: start over from the first step. */
-export const OnboardingRestartPayload = z.object({});
+/** Settings, hub -> onboarding: start over, or open one step (an `OnboardingStep` id). */
+export const OnboardingRestartPayload = z.object({ step: z.string().max(32).optional() });
 export type OnboardingRestartPayload = z.infer<typeof OnboardingRestartPayload>;
 
 /** Events, Rust -> frontend (spec 3.3), plus window-to-window messages (bar preview, onboarding restart). */

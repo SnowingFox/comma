@@ -1,27 +1,25 @@
-import { Kbd, KbdGroup } from "@multica/ui/components/ui/kbd";
+import { DEFAULT_SHORTCUTS, type ShortcutSettings } from "@comma/shared/ipc";
+import { useSettings } from "../lib/queries";
+import { Keycaps } from "./keycaps";
 
-export const DEFAULT_SHORTCUTS = [
-  { mode: "Dictate", keys: ["⌥", "Space"], how: "Hold, speak, release" },
-  { mode: "Ask Anything", keys: ["⌥", "⇧", "Space"], how: "Tap to start, tap to stop" },
-  { mode: "Translate", keys: ["⌃", "⌥", "Space"], how: "Hold, speak, release" },
+const MODES: { mode: keyof ShortcutSettings; name: string; how: string }[] = [
+  { mode: "dictate", name: "Dictate", how: "Hold, speak, release" },
+  { mode: "ask", name: "Ask Anything", how: "Tap to start, tap to stop" },
+  { mode: "translate", name: "Translate", how: "Hold, speak, release" },
 ];
 
+/** The three configured shortcuts as keycaps. */
 export function ShortcutList() {
+  const shortcuts = useSettings().data?.shortcuts ?? DEFAULT_SHORTCUTS;
   return (
     <ul className="flex flex-col divide-y divide-border">
-      {DEFAULT_SHORTCUTS.map((s) => (
-        <li key={s.mode} className="flex items-center justify-between gap-4 py-2.5 first:pt-0 last:pb-0">
+      {MODES.map((m) => (
+        <li key={m.mode} className="flex items-center justify-between gap-4 py-2.5 first:pt-0 last:pb-0">
           <div className="flex flex-col">
-            <span className="text-body font-medium">{s.mode}</span>
-            <span className="text-caption text-muted-foreground">{s.how}</span>
+            <span className="text-body font-medium">{m.name}</span>
+            <span className="text-caption text-muted-foreground">{m.how}</span>
           </div>
-          <KbdGroup>
-            {s.keys.map((k) => (
-              <Kbd key={k} className="h-6 min-w-6 px-1.5 text-label">
-                {k}
-              </Kbd>
-            ))}
-          </KbdGroup>
+          <Keycaps accel={shortcuts[m.mode]} size="sm" />
         </li>
       ))}
     </ul>
