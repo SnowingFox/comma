@@ -29,20 +29,28 @@ export function useShortcutEvents(handlers: ShortcutHandlers, enabled = true) {
 }
 
 /**
- * While mounted (and `enabled`), shortcut events go to this onboarding window when it is focused
- * instead of the bar, so the try-it steps run in place.
+ * While mounted (and `enabled`), shortcut events go to this window when it is focused instead of
+ * the bar, so the onboarding try-it steps run in place and the hub's Fn key test records nothing.
  */
-export function useCaptureShortcuts(enabled = true) {
+export function useCaptureShortcuts(enabled = true, owner: "onboarding" | "hub" = "onboarding") {
   useEffect(() => {
     if (!enabled || !inTauri) return;
-    void invoke("shortcuts_capture", { owner: "onboarding" }).catch(() => {});
+    void invoke("shortcuts_capture", { owner }).catch(() => {});
     return () => void invoke("shortcuts_capture", { owner: null }).catch(() => {});
-  }, [enabled]);
+  }, [enabled, owner]);
 }
 
+export const shortcutsStatusKey = ["shortcuts_status"] as const;
+
+/** The listener status: polled, and replaced at once by `shortcut://status`. */
 export function useShortcutsStatus() {
+  const qc = useQueryClient();
+  useEffect(() => {
+    const off = listen("shortcut://status", (status) => qc.setQueryData(shortcutsStatusKey, status));
+    return () => void off.then((f) => f());
+  }, [qc]);
   return useQuery({
-    queryKey: ["shortcuts_status"],
+    queryKey: shortcutsStatusKey,
     queryFn: () => invoke("shortcuts_status"),
     refetchInterval: 2_000,
     staleTime: 0,

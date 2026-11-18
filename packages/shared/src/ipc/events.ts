@@ -22,6 +22,48 @@ export type ShortcutSwitchPayload = z.infer<typeof ShortcutSwitchPayload>;
 export const ShortcutKeysPayload = z.object({ held: z.array(z.string().max(32)).max(8) });
 export type ShortcutKeysPayload = z.infer<typeof ShortcutKeysPayload>;
 
+/** How the shortcuts are listened for right now (`shortcuts_status`, `shortcut://status`). */
+export const ShortcutsStatus = z.object({
+  /**
+   * `fn`: the Fn tap runs and Input Monitoring is allowed. `fallback`: an Fn shortcut cannot be trusted yet, so the
+   * ordinary fallbacks are registered (the tap may still run next to them).
+   */
+  listener: z.enum(["fn", "fallback"]),
+  /** The shortcut each mode answers to now: the configured one, or its fallback while Fn cannot be used. */
+  active: z.object({ dictate: z.string(), ask: z.string(), translate: z.string() }),
+  /** Modes whose shortcut could not be registered (taken by another app), with the reason. */
+  errors: z.array(z.object({ mode: RunMode, message: z.string() })),
+  /**
+   * System Settings > Keyboard > "Press Globe key to". Comma cannot stop that action, so anything but `none` also
+   * opens the emoji picker, switches input source or starts macOS dictation when Fn is pressed.
+   */
+  globe_key: z.enum(["none", "input_source", "emoji", "dictation", "unknown"]),
+  /** The Fn tap. macOS creates one even without Input Monitoring, so `running` alone proves nothing. */
+  tap: z.enum(["running", "off", "failed"]),
+  tap_error: z.string().nullable(),
+  /** Some keyboard event reached the tap since it started. */
+  tap_delivered: z.boolean(),
+  /** The Input Monitoring preflight, as this process sees it. */
+  input_monitoring: z.boolean(),
+  /** Allowed, but the tap does not start: macOS applies it after Comma restarts. */
+  restart_required: z.boolean(),
+  /** Everything registered now: Fn bindings on the tap, ordinary shortcuts through the plugin. */
+  registered: z.array(z.object({ mode: RunMode, shortcut: z.string(), via: z.enum(["fn", "plugin"]) })),
+});
+export type ShortcutsStatus = z.infer<typeof ShortcutsStatus>;
+
+/** `shortcut://action`, to every window: what the shortcut state machine decided. Names only configured shortcuts. */
+export const ShortcutActionPayload = z.object({
+  action: z.enum(["start", "switch", "stop", "cancel", "hint"]),
+  mode: RunMode,
+  hands_free: z.boolean().optional(),
+  /** `fn`: the Fn tap; `plugin`: an ordinary registered shortcut. */
+  source: z.enum(["fn", "plugin"]),
+  /** Where the down, up, cancel and switch events went. */
+  target: z.enum(["bar", "onboarding", "hub"]),
+});
+export type ShortcutActionPayload = z.infer<typeof ShortcutActionPayload>;
+
 export const RunStagePayload = z.object({
   id: z.string(),
   stage: RunStage,
@@ -80,11 +122,16 @@ export type RunErrorPayload = z.infer<typeof RunErrorPayload>;
 export const BarState = z.enum(["idle", "recording", "processing", "done", "empty", "error"]);
 export type BarState = z.infer<typeof BarState>;
 
-/** Dev-only preview, hub -> bar window, from Settings > Developer. */
+/** Preview, hub -> bar window, from Settings > Developer and the devtool. `idle` ends the preview. */
 export const BarPreviewPayload = z.object({
   state: BarState,
   mode: RunMode.optional(),
   message: z.string().optional(),
+  hands_free: z.boolean().optional(),
+  done_label: z.string().max(40).optional(),
+  hint: z.string().max(200).optional(),
+  hint_actions: z.array(z.string().max(24)).max(3).optional(),
+  answer: z.string().max(2000).optional(),
 });
 export type BarPreviewPayload = z.infer<typeof BarPreviewPayload>;
 
@@ -107,6 +154,8 @@ export const events = {
   "shortcut://cancel": ShortcutPayload,
   "shortcut://switch": ShortcutSwitchPayload,
   "shortcut://keys": ShortcutKeysPayload,
+  "shortcut://action": ShortcutActionPayload,
+  "shortcut://status": ShortcutsStatus,
   "run://stage": RunStagePayload,
   "run://delta": RunDeltaPayload,
   "run://done": RunDonePayload,

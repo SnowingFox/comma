@@ -8,6 +8,7 @@
 //   ?keys=1|0                pretend an ElevenLabs key is stored and a model is picked
 //   ?step=<id>               resume onboarding at this step
 //   ?mode=local|account
+//   ?listener=fn|fallback|restart   the Fn listener (see mock/runtime.ts)
 //   ?reset                   forget everything
 import { match } from "ts-pattern";
 import {
@@ -101,6 +102,11 @@ function applyUrlKnobs() {
   if (mode === "local" || mode === "account") state.settings.mode = mode;
   const step = params.get("step");
   if (step) state.settings.onboarding_step = step;
+  const listener = params.get("listener");
+  if (listener === "fn" || listener === "fallback" || listener === "restart") {
+    localStorage.setItem("comma-dev-listener", listener);
+    if (listener !== "fn") state.permissions = { ...state.permissions, input_monitoring: listener === "restart" ? "granted" : "denied" };
+  }
   save(state);
 }
 applyUrlKnobs();
@@ -227,6 +233,15 @@ export async function mockInvoke(command: CommandName, args: Record<string, unkn
         ttft_ms: 380.1,
         total_ms: 812.4,
       };
+    })
+    .with("pipeline_check", async () => {
+      if (state.settings.mode === "account") {
+        if (!state.session) fail("not_configured", "You're signed out of Comma. Sign in again in Settings", "signed_out");
+        return null;
+      }
+      if (!state.secrets.elevenlabs) fail("not_configured", "Add your ElevenLabs key in Settings to start dictating", "missing_elevenlabs_key");
+      if (!state.settings.llm.model) fail("not_configured", "Pick an LLM model in Settings to start dictating", "missing_llm_model");
+      return null;
     })
     .with("account_check", async () => {
       await wait(300);

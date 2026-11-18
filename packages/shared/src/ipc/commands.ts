@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { HintKind, RunMode, RunOutput, RunResult } from "./events";
+import { HintKind, RunMode, RunOutput, RunResult, ShortcutsStatus } from "./events";
 import { LanguageTag, LlmBaseUrl, ReasoningEffort, Settings, SettingsPatch } from "./settings";
 
 /** Keychain entries. Values are write-only from the frontend. */
@@ -115,22 +115,6 @@ export const OnboardingStep = z.enum([
 export type OnboardingStep = z.infer<typeof OnboardingStep>;
 
 const Email = z.string().trim().min(3).max(320);
-
-/** How the shortcuts are listened for right now. */
-export const ShortcutsStatus = z.object({
-  /** `fn`: the modifier listener runs (Input Monitoring allowed). `fallback`: only ordinary shortcuts are registered. */
-  listener: z.enum(["fn", "fallback"]),
-  /** The shortcut each mode answers to now: the configured one, or its fallback while Fn cannot be used. */
-  active: z.object({ dictate: z.string(), ask: z.string(), translate: z.string() }),
-  /** Modes whose shortcut could not be registered (taken by another app), with the reason. */
-  errors: z.array(z.object({ mode: RunMode, message: z.string() })),
-  /**
-   * System Settings > Keyboard > "Press Globe key to". Comma cannot stop that action, so anything but `none` also
-   * opens the emoji picker, switches input source or starts macOS dictation when Fn is pressed.
-   */
-  globe_key: z.enum(["none", "input_source", "emoji", "dictation", "unknown"]),
-});
-export type ShortcutsStatus = z.infer<typeof ShortcutsStatus>;
 
 export const RunSource = z.enum(["bar", "onboarding"]);
 export type RunSource = z.infer<typeof RunSource>;
@@ -289,8 +273,15 @@ export const commands = {
   /** Asks macOS for Input Monitoring (adds Comma to the list and shows the prompt once). Resolves with whether it is allowed. */
   input_monitoring_request: { args: NoArgs, result: z.boolean() },
   shortcuts_status: { args: NoArgs, result: ShortcutsStatus },
-  /** While `owner` is focused, shortcut events go only to it (onboarding try steps); null gives them back to the bar. */
-  shortcuts_capture: { args: z.object({ owner: z.enum(["onboarding"]).nullable() }).strict(), result: Unit },
+  /**
+   * While `owner` is focused, shortcut events go only to it (onboarding try steps, the hub's Fn key test) and nothing
+   * records; null gives them back to the bar.
+   */
+  shortcuts_capture: { args: z.object({ owner: z.enum(["onboarding", "hub"]).nullable() }).strict(), result: Unit },
+  /** Stops the Fn tap and the ordinary shortcuts and registers everything again. */
+  shortcuts_restart: { args: NoArgs, result: ShortcutsStatus },
+  /** Re-checks Input Monitoring and tries the Fn tap even when the preflight says no. */
+  shortcuts_probe: { args: NoArgs, result: ShortcutsStatus },
   /** While the shortcut recorder is open: nothing is registered or matched, so its keys reach the window. */
   shortcuts_suspend: { args: z.object({ suspended: z.boolean() }).strict(), result: Unit },
 
@@ -317,6 +308,11 @@ export const commands = {
   },
   /** Stops the run in flight, if any. */
   pipeline_cancel: { args: NoArgs, result: Unit },
+  /**
+   * What a run needs before recording: the ElevenLabs key and an LLM model (Local), or a session (account). Rejects
+   * with `not_configured` and `reason` `missing_elevenlabs_key`, `missing_llm_model` or `signed_out`.
+   */
+  pipeline_check: { args: z.object({ mode: RunMode }).strict(), result: Unit },
   /** Pastes `text` into the app that was focused when the run started (answer card Insert). */
   output_insert: { args: z.object({ text: z.string().min(1).max(100_000) }).strict(), result: RunOutput },
   /** Puts `text` on the clipboard. */
@@ -336,6 +332,21 @@ export const commands = {
   hint_take: { args: z.object({ kind: HintKind }).strict(), result: z.boolean() },
   /** Forgets how often each hint was shown, so the teaching hints show again. */
   hints_reset: { args: NoArgs, result: Unit },
+
+  /** The last lines of the app log (`~/Library/Logs/app.comma.desktop/comma.log`). */
+  log_tail: {
+    args: z.object({ lines: z.number().int().min(1).max(1000).optional() }).strict(),
+    result: z.object({ path: z.string(), lines: z.array(z.string()) }),
+  },
+  /** A line from a window: states and error names only, never dictated or typed text. */
+  log_write: {
+    args: z
+      .object({ level: z.enum(["info", "warn", "error"]), scope: z.string().max(32), message: z.string().max(500) })
+      .strict(),
+    result: Unit,
+  },
+  /** Quits and relaunches Comma (macOS applies Input Monitoring to a new process). */
+  app_restart: { args: NoArgs, result: Unit },
 
   runs_list: { args: RunsQuery, result: z.array(RunRecord) },
   run_get: { args: z.object({ id: z.string().max(64) }).strict(), result: RunRecord },
