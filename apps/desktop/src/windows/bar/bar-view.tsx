@@ -59,6 +59,8 @@ export type BarViewProps = {
   hint?: BarHint | null;
   answer?: BarAnswer | null;
   onDetails?: () => void;
+  /** The error card's button; "Details" (the run in History) by default. */
+  detailsLabel?: string;
   onContextMenu?: () => void;
 };
 
@@ -182,6 +184,7 @@ export function BarView({
   hint,
   answer,
   onDetails,
+  detailsLabel = "Details",
   onContextMenu,
 }: BarViewProps) {
   const reduced = useReducedMotion();
@@ -301,7 +304,7 @@ export function BarView({
                   onClick={onDetails}
                   className="h-7 shrink-0 rounded-[9px] bg-white/10 px-2.5 text-label font-medium text-white transition-colors hover:bg-white/18"
                 >
-                  Details
+                  {detailsLabel}
                 </button>
               ) : null}
             </Fade>

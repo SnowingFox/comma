@@ -5,6 +5,7 @@ import { allowInputMonitoring } from "../../components/shortcut-notes";
 import { OpusStream } from "../../lib/audio/ogg-opus";
 import { encodeClip, listMicrophones, Recorder } from "../../lib/audio/recorder";
 import { emitTo, errorMessage, inTauri, invoke, IpcError, listen } from "../../lib/ipc";
+import { devtoolsEnabled } from "../../lib/devtool-store";
 import { useSettings, useUpdateSettings } from "../../lib/queries";
 import { acceleratorWords } from "../../lib/shortcut";
 import { useSettingsSync, useShortcutEvents } from "../../lib/shortcut-events";
@@ -12,6 +13,7 @@ import { playTick } from "../../lib/sounds";
 import { MIN_SECS, SILENCE_PEAK } from "../../lib/use-voice-run";
 import { BarView, type BarAnswer, type BarHint } from "./bar-view";
 import { betterMicrophone } from "./microphones";
+import { createFakeLevel } from "./waveform";
 
 /** Spec 2.1 timings. */
 const DONE_MS = 600;
@@ -27,11 +29,19 @@ type View =
   | { state: "processing"; mode: RunMode }
   | { state: "done"; label?: string }
   | { state: "empty"; message: string }
-  | { state: "error"; message: string; runId?: string };
+  | { state: "error"; message: string; runId?: string; settings?: string };
+
+/** A line in the app log: states and error names only, never what was said. */
+function logLine(level: "info" | "warn" | "error", message: string) {
+  if (inTauri) void invoke("log_write", { level, scope: "bar", message }).catch(() => {});
+}
+
+/** The Settings section that fixes a `pipeline_check` failure. */
+const FIX_SECTION: Record<string, string> = { missing_elevenlabs_key: "speech", missing_llm_model: "llm" };
 
 /**
  * Dev: `bar.html?state=recording&mode=translate` opens straight into a state; `hands=1`, `done=Copied`,
- * `hint=<text>` and `answer=<text>` add the rest of what the bar can show.
+ * `hint=<text>`, `actions=A,B` and `answer=<text>` add the rest of what the bar can show.
  */
 function devInitial(): BarPreviewPayload | null {
   if (!import.meta.env.DEV || inTauri) return null;
@@ -41,6 +51,11 @@ function devInitial(): BarPreviewPayload | null {
     state: BarState.catch("idle").parse(params.get("state")),
     mode: RunMode.catch("dictate").parse(params.get("mode")),
     message: params.get("message") ?? undefined,
+    hands_free: params.get("hands") === "1",
+    done_label: params.get("done") ?? undefined,
+    hint: params.get("hint") ?? undefined,
+    hint_actions: params.get("actions")?.split(","),
+    answer: params.get("answer") ?? undefined,
   };
 }
 
@@ -165,9 +180,10 @@ function useBarLoop() {
   );
 
   const fail = useCallback(
-    (message: string, runId?: string) => {
+    (message: string, runId?: string, settings?: string) => {
       clearTimers();
-      setView({ state: "error", message, runId });
+      logLine("warn", `error card: ${runId ? `run ${runId}` : settings ? `needs settings > ${settings}` : "no run"}`);
+      setView({ state: "error", message, runId, settings });
       layout("full", true);
       later(ERROR_MS, settle);
     },
@@ -250,6 +266,20 @@ function useBarLoop() {
       if (sounds()) playTick("start");
       const deviceId = settingsRef.current?.audio.microphone_id || undefined;
       const run = generation.current;
+      // In parallel with opening the microphone: a missing key or session shows at once, not after
+      // the recording (and a quick press still says what is wrong).
+      void invoke("pipeline_check", { mode }).catch((err: unknown) => {
+        if (run !== generation.current) return;
+        generation.current += 1;
+        closeRecorder();
+        const e = err instanceof IpcError ? err : undefined;
+        if (e?.reason === "signed_out") {
+          settle();
+          showHint("signed_out");
+          return;
+        }
+        fail(errorMessage(err), undefined, e?.reason ? (FIX_SECTION[e.reason] ?? "general") : undefined);
+      });
       const opened = Recorder.open(deviceId).catch((err: unknown) => {
         // A saved device that is gone falls back to the default one.
         if (deviceId && err instanceof DOMException && err.name === "OverconstrainedError") return Recorder.open();
@@ -276,6 +306,8 @@ function useBarLoop() {
         })
         .catch((err: unknown) => {
           closeRecorder();
+          logLine("warn", `microphone did not open: ${err instanceof DOMException ? err.name : "error"}`);
+          if (run !== generation.current) return;
           if (err instanceof DOMException && err.name === "NotAllowedError") {
             settle();
             showHint("microphone_denied");
@@ -382,11 +414,12 @@ function useBarLoop() {
     answer: answerProps,
     level: () => level.current,
     language: (targets[0] ?? "en").split("-")[0]!.toUpperCase(),
+    detailsLabel: view.state === "error" && view.settings ? "Settings" : undefined,
     onDetails:
       view.state === "error"
         ? () => {
-            const id = view.runId;
-            void emitTo("hub", "hub://open", { page: "history", section: id }).catch(() => {});
+            const target = view.settings ? { page: "settings" as const, section: view.settings } : { page: "history" as const, section: view.runId };
+            void emitTo("hub", "hub://open", target).catch(() => {});
             void invoke("window_show", { label: "hub" }).catch(() => {});
           }
         : undefined,
@@ -397,28 +430,32 @@ function BarApp() {
   useSettingsSync();
   const loop = useBarLoop();
   const [preview, setPreview] = useState<BarPreviewPayload | null>(devInitial);
+  const [previewLevel] = useState(createFakeLevel);
 
+  // Previews from Settings > Developer and the devtool (dev builds, or with developer tools on).
+  // An idle preview without a hint or answer gives the bar back to the dictation loop.
   useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    const off = listen("bar://preview", setPreview);
+    const off = listen("bar://preview", (p) => {
+      if (!import.meta.env.DEV && !devtoolsEnabled()) return;
+      setPreview(p.state === "idle" && !p.hint && !p.answer ? null : p);
+    });
     return () => void off.then((f) => f());
   }, []);
 
   if (preview) {
     const params = new URLSearchParams(window.location.search);
-    const hintText = params.get("hint");
-    const answerText = params.get("answer");
     const noop = () => {};
     return (
       <BarView
         state={preview.state}
         mode={preview.mode}
         message={preview.message ?? (preview.state === "error" ? "Couldn't reach ElevenLabs" : undefined)}
-        handsFree={params.get("hands") === "1"}
-        doneLabel={params.get("done") ?? undefined}
+        handsFree={preview.hands_free}
+        level={previewLevel}
+        doneLabel={preview.done_label}
         language={params.get("lang") ?? undefined}
-        hint={hintText ? { text: hintText, actions: params.get("actions") ? params.get("actions")!.split(",").map((label, i) => ({ label, primary: i === 0, onClick: noop })) : undefined, onDismiss: noop } : null}
-        answer={answerText ? { text: answerText, onCopy: noop, onInsert: noop, onClose: noop } : null}
+        hint={preview.hint ? { text: preview.hint, actions: preview.hint_actions?.map((label, i) => ({ label, primary: i === 0, onClick: noop })), onDismiss: noop } : null}
+        answer={preview.answer ? { text: preview.answer, onCopy: noop, onInsert: noop, onClose: noop } : null}
         onDetails={preview.state === "error" ? noop : undefined}
       />
     );
@@ -438,6 +475,7 @@ function BarApp() {
       hint={loop.hint}
       answer={loop.answer}
       onDetails={loop.onDetails}
+      detailsLabel={loop.detailsLabel}
       onContextMenu={() => void invoke("bar_menu").catch(() => {})}
     />
   );
