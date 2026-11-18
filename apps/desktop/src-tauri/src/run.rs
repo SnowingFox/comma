@@ -456,7 +456,10 @@ pub async fn pipeline_run(app: &AppHandle, state: &AppState, args: RunArgs) -> A
     }
     let _guard = RunGuard { state, shortcuts };
 
-    let result = run_inner(app, state, &args, &id, source_label, cancel, started).await;
+    let emit = |label: &str, event: &str, payload: Value| {
+        let _ = app.emit_to(label, event, payload);
+    };
+    let result = run_inner(&emit, state, &args, &id, source_label, cancel, started).await;
     match &result {
         Ok(done) => {
             let _ = app.emit("run://done", json!({ "id": id, "result": done }));
@@ -469,8 +472,12 @@ pub async fn pipeline_run(app: &AppHandle, state: &AppState, args: RunArgs) -> A
     result
 }
 
-async fn run_inner(
-    app: &AppHandle,
+/// Sends a progress event (`run://stage`, `run://delta`) to one window. A closure, so tests can
+/// run the pipeline without a Tauri app.
+pub type Emit<'a> = &'a (dyn Fn(&str, &str, Value) + Send + Sync);
+
+pub async fn run_inner(
+    emit: Emit<'_>,
     state: &AppState,
     args: &RunArgs,
     id: &str,
@@ -496,12 +503,12 @@ async fn run_inner(
     let provider = if settings.mode == AppMode::Account { "comma" } else { "local" };
 
     let emit_stage = |stage: &str, elapsed: f64| {
-        let _ = app.emit_to(source_label, "run://stage", json!({ "id": id, "stage": stage, "ms": elapsed }));
+        emit(source_label, "run://stage", json!({ "id": id, "stage": stage, "ms": elapsed }));
     };
     let outcome = if settings.mode == AppMode::Account {
         run_account(state, &clip, args, &ctx, target.as_deref()).await
     } else {
-        run_local(app, state, &clip, args.mode, &ctx, target, id, source_label, cancel.clone()).await
+        run_local(emit, state, &clip, args.mode, &ctx, target, id, source_label, cancel.clone()).await
     };
     let keep = settings.privacy.keep_audio.then_some((clip.bytes.as_slice(), clip.ext));
     let outcome = match outcome {
@@ -615,7 +622,7 @@ fn mode_str(mode: Mode) -> &'static str {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_local(
-    app: &AppHandle,
+    emit: Emit<'_>,
     state: &AppState,
     clip: &Clip,
     mode: Mode,
@@ -648,10 +655,10 @@ async fn run_local(
     let run = pipeline::run(&stt, &endpoint, audio, &opts, &rc, cancel, |event| match event {
         Event::Stage { stage, elapsed } => {
             let stage = if stage == Stage::Stt { "stt" } else { "llm" };
-            let _ = app.emit_to(delta_target.as_str(), "run://stage", json!({ "id": id, "stage": stage, "ms": ms(elapsed) }));
+            emit(delta_target.as_str(), "run://stage", json!({ "id": id, "stage": stage, "ms": ms(elapsed) }));
         }
         Event::Delta(text) => {
-            let _ = app.emit_to(delta_target.as_str(), "run://delta", json!({ "id": id, "text": text }));
+            emit(delta_target.as_str(), "run://delta", json!({ "id": id, "text": text }));
         }
     })
     .await?;

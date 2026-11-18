@@ -950,6 +950,59 @@ mod tests {
         assert_eq!(err.code, ErrorCode::UnknownModel);
     }
 
+    /// A Local-mode run through the app's pipeline (`run::run_inner`, what `pipeline_run` calls):
+    /// the real rewrite on magpie, ElevenLabs mocked (no key in the Keychain). Saves to history.
+    /// `COMMA_TEST_WAV=/path/speech.wav COMMA_TEST_MODEL=... cargo test -p comma real_local_run -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "needs magpie running at 127.0.0.1:3425"]
+    async fn real_local_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = state(&dir);
+        let model = std::env::var("COMMA_TEST_MODEL").unwrap_or_else(|_| "cursor/deepseek-v41-flash-1017".into());
+        let wav = std::env::var("COMMA_TEST_WAV").map(|p| std::fs::read(p).unwrap()).unwrap_or_else(|_| wav::test_clip());
+        let secs = wav::duration_secs(&wav).unwrap();
+        let raw = "um so I wanted to uh follow up on the design review from tuesday can we move the launch to next thursday no wait next friday and make sure the onboarding copy is final by then";
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/speech-to-text"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "text": raw, "language_code": "eng", "language_probability": 0.98 })))
+            .expect(2)
+            .mount(&mock)
+            .await;
+        state.elevenlabs_base_url = mock.uri();
+        secrets::set_secret(state.secrets.as_ref(), SecretName::Elevenlabs, "el-mock").unwrap();
+        state.update_settings(&json!({ "llm": { "model": model, "reasoning_effort": "off" }, "languages": { "spoken": ["en"] } })).unwrap();
+        state.db.add_term("Comma").unwrap();
+
+        let events = std::sync::Mutex::new(Vec::<String>::new());
+        let emit = |label: &str, event: &str, payload: Value| {
+            events.lock().unwrap().push(format!("{label} {event} {payload}"));
+        };
+        for (mode, selected) in [(Mode::Dictate, None), (Mode::Ask, Some("Our launch is scheduled for next Thursday at the earliest, pending design review."))] {
+            let args = run::RunArgs {
+                mode,
+                audio_base64: base64::engine::general_purpose::STANDARD.encode(&wav),
+                source: run::RunSource::Onboarding,
+                target_language: None,
+                selected_text: selected.map(str::to_owned),
+                record_ms: Some(secs * 1000.0),
+                audio_secs: None,
+            };
+            let t = std::time::Instant::now();
+            let out = run::run_inner(&emit, &state, &args, &format!("test-{mode:?}"), "onboarding", comma_voice::CancellationToken::new(), t).await.unwrap();
+            println!(
+                "{mode:?}: {:.1} s audio, stt {} ms (mock), llm first token {:?} ms, llm {} ms, total {} ms, delivery {:?}\n  raw: {}\n  refined: {}",
+                out.audio_secs, out.stt_ms, out.llm_ttft_ms, out.llm_total_ms, out.total_ms, out.delivery, out.raw_text, out.refined_text
+            );
+            assert!(!out.refined_text.is_empty());
+        }
+        let runs = state.db.list_runs(&db::RunsQuery { search: None, before: None, limit: Some(10) }).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert!(runs.iter().all(|r| r.ok && r.model.is_some()));
+        assert!(events.lock().unwrap().iter().any(|e| e.contains("run://stage") && e.contains("\"llm\"")));
+        println!("events: {}", events.lock().unwrap().len());
+    }
+
     /// Account mode: an expired access token is refused with 401, refreshed once, and the call is
     /// retried with the new token; the refreshed pair is stored.
     #[tokio::test]
