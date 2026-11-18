@@ -1,9 +1,9 @@
 import type { ComponentProps } from "react";
 import { cn } from "@multica/ui/lib/utils";
 
-/** The comma glyph on a 24-unit grid: a round dot with a tapered tail. */
+/** The comma glyph on a 24-unit grid, the same drawing as the app icon (`src-tauri/icons/source/icon.svg`). */
 export const COMMA_GLYPH =
-  "M12 6.1a3.9 3.9 0 0 1 3.9 3.9c0 4.6-2.5 8-6.3 9.7a.6.6 0 0 1-.6-1c1.7-1.2 2.8-2.7 3.1-4.4A3.9 3.9 0 0 1 12 6.1Z";
+  "M12.12 5.13A4.43 4.43 0 0 1 16.54 9.55C16.54 14.16 14.45 17.65 10.14 19.81C9.55 20.1 8.97 19.57 9.38 19.05C11.13 17.18 12.12 15.61 12.47 13.95A4.43 4.43 0 0 1 7.69 9.55A4.43 4.43 0 0 1 12.12 5.13Z";
 
 /** Comma's mark: the glyph on a rounded tile. Ink tile in light mode, inverted in dark. */
 export function CommaMark({ size = 24, className, ...props }: ComponentProps<"svg"> & { size?: number }) {
@@ -17,7 +17,7 @@ export function CommaMark({ size = 24, className, ...props }: ComponentProps<"sv
       {...props}
     >
       <rect width="24" height="24" rx="6.5" className="fill-foreground" />
-      <path d={COMMA_GLYPH} transform="translate(0.2 -1.3)" className="fill-background" />
+      <path d={COMMA_GLYPH} className="fill-background" />
     </svg>
   );
 }
