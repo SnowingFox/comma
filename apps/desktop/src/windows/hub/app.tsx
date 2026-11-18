@@ -1,7 +1,10 @@
 import { SidebarInset, SidebarProvider } from "@multica/ui/components/ui/sidebar";
 import { AppSidebar } from "./app-sidebar";
-import { DictionaryPage, HistoryPage, UsagePage } from "./pages/empty-pages";
+import { useHistorySync } from "../../lib/history-queries";
+import { DictionaryPage } from "./pages/dictionary";
+import { HistoryPage } from "./pages/history";
 import { HomePage } from "./pages/home";
+import { UsagePage } from "./pages/usage";
 import { useRoute, type Page } from "./route";
 import { SettingsPage } from "./settings/settings-page";
 
@@ -15,6 +18,7 @@ const PAGES: Record<Page, () => React.JSX.Element> = {
 
 export function HubApp() {
   const { page } = useRoute();
+  useHistorySync();
   const Current = PAGES[page];
   return (
     // The traffic lights sit over the sidebar, so it keeps its own toggle on screen.
