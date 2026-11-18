@@ -1,4 +1,6 @@
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { getVersion } from "@tauri-apps/api/app";
 import { MulticaIcon } from "@multica/ui/components/common/multica-icon";
 import { MulticaWordmark } from "@multica/ui/components/common/multica-wordmark";
@@ -11,14 +13,41 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@multica/ui/components/ui/dialog";
+import { Switch } from "@multica/ui/components/ui/switch";
 import { ArrowUpRight } from "@multica/ui/icons";
 import commaLicense from "../../../../../../LICENSE?raw";
 import multicaLicense from "../../../../../../packages/multica-ui/LICENSE?raw";
 import multicaNotice from "../../../../../../packages/multica-ui/NOTICE?raw";
 import { CommaMark } from "../../../components/brand";
+import { setDevtoolsEnabled, useDevtoolsEnabled } from "../../../lib/devtool-store";
 import { inTauri } from "../../../lib/ipc";
 import { openExternal } from "../../../lib/external";
-import { Group, SectionHeader } from "./ui";
+import { Group, Row, SectionHeader } from "./ui";
+
+/** Clicks on the version that turn developer tools on. */
+const UNLOCK_CLICKS = 5;
+
+/**
+ * Developer tools: on by default in dev builds; in a release, five clicks on the version show the
+ * switch (and turn them on).
+ */
+function useVersionUnlock() {
+  const enabled = useDevtoolsEnabled();
+  const [revealed, setRevealed] = useState(false);
+  const clicks = useRef<number[]>([]);
+  const onVersionClick = () => {
+    const now = Date.now();
+    clicks.current = [...clicks.current.filter((t) => now - t < 3_000), now];
+    if (clicks.current.length < UNLOCK_CLICKS) return;
+    clicks.current = [];
+    setRevealed(true);
+    if (!enabled) {
+      setDevtoolsEnabled(true);
+      toast.success("Developer tools are on. Find the DEV tab on the right edge.");
+    }
+  };
+  return { enabled, show: revealed || enabled || import.meta.env.DEV, onVersionClick };
+}
 
 /** Required by the Multica License: shown wherever Comma shows its own attribution. */
 const MULTICA_COPYRIGHT = "Copyright 2025-2026 Index Labs (Hong Kong) Limited";
@@ -51,6 +80,7 @@ function LicenseDialog({ title, description, text }: { title: string; descriptio
 
 export function AboutSection() {
   const version = useAppVersion();
+  const dev = useVersionUnlock();
   return (
     <>
       <SectionHeader title="About" />
@@ -59,10 +89,25 @@ export function AboutSection() {
         <div className="flex flex-1 flex-col gap-0.5">
           <span className="text-title-lg font-semibold tracking-tight">Comma</span>
           <span className="text-label text-muted-foreground">
-            Version {version ?? "…"} · Open-source voice keyboard for macOS
+            {/* Five clicks turn on developer tools. */}
+            <span onClick={dev.onVersionClick} className="cursor-default select-none" data-testid="about-version">
+              Version {version ?? "…"}
+            </span>{" "}
+            · Open-source voice keyboard for macOS
           </span>
         </div>
       </div>
+
+      {dev.show ? (
+        <Group title="Developer">
+          <Row
+            label="Developer tools"
+            description="A DEV tab on the right edge of this window: the Fn listener, permissions, runs, the app log, onboarding steps and bar previews."
+          >
+            <Switch checked={dev.enabled} onCheckedChange={(on) => setDevtoolsEnabled(on)} aria-label="Developer tools" />
+          </Row>
+        </Group>
+      ) : null}
 
       <Group title="Licenses">
         <div className="flex items-center justify-between gap-6">
