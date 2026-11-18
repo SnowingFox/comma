@@ -1,7 +1,9 @@
 import { SidebarInset, SidebarProvider } from "@multica/ui/components/ui/sidebar";
 import { AppSidebar } from "./app-sidebar";
 import { useEffect } from "react";
+import { useDevtoolsEnabled } from "../../lib/devtool-store";
 import { useHistorySync } from "../../lib/history-queries";
+import { DevTool } from "./devtool/devtool";
 import { listen } from "../../lib/ipc";
 import { useSettingsSync } from "../../lib/shortcut-events";
 import { DictionaryPage } from "./pages/dictionary";
@@ -29,6 +31,7 @@ export function HubApp() {
     return () => void off.then((f) => f());
   }, []);
   const Current = PAGES[page];
+  const devtools = useDevtoolsEnabled();
   return (
     // The traffic lights sit over the sidebar, so it keeps its own toggle on screen.
     <SidebarProvider hasExternalTrigger className="h-full min-h-0 bg-sidebar">
@@ -36,6 +39,7 @@ export function HubApp() {
       <SidebarInset className="min-h-0 overflow-hidden">
         <Current />
       </SidebarInset>
+      {devtools ? <DevTool /> : null}
     </SidebarProvider>
   );
 }

@@ -162,29 +162,49 @@ pub async fn secret_status(state: State<'_, AppState>) -> AppResult<SecretStatus
     secrets::status(state.secrets.as_ref())
 }
 
+/// Input Monitoring is granted when the preflight says so or a key press reached the Fn tap (the
+/// preflight can stay "no" until relaunch). A running tap alone is no proof: macOS creates one
+/// without the permission and then passes it modifier changes only.
 #[tauri::command]
 pub fn permissions_status(app: AppHandle) -> PermissionsStatus {
     let mut status = permissions::status();
-    // The preflight can say no while the tap works (it is the real answer).
-    if app.try_state::<Shortcuts>().is_some_and(|s| s.fn_running()) {
+    if app.try_state::<Shortcuts>().is_some_and(|s| s.input_monitoring_effective()) {
         status.input_monitoring = permissions::PermissionState::Granted;
     }
     status
 }
 
+/// On a click only. The system prompt can show once per process; later clicks just re-check (the
+/// frontend then opens System Settings, and offers a relaunch).
 #[tauri::command]
 pub fn input_monitoring_request(app: AppHandle) -> bool {
-    let granted = comma_input::request_input_monitoring();
-    if let Some(shortcuts) = app.try_state::<Shortcuts>() {
-        shortcuts.enable_probe();
-        if let Some(state) = app.try_state::<AppState>()
-            && let Ok(s) = state.snapshot()
-        {
-            shortcuts.reconfigure(&app, &s.shortcuts);
-        }
-        return granted || shortcuts.fn_running();
-    }
-    granted
+    let Some(shortcuts) = app.try_state::<Shortcuts>() else { return comma_input::input_monitoring_granted() };
+    let granted = if shortcuts.take_request() {
+        let granted = comma_input::request_input_monitoring();
+        log::info!("Input Monitoring requested: {}", if granted { "allowed" } else { "not allowed yet" });
+        granted
+    } else {
+        log::info!("Input Monitoring asked again: not prompting a second time in this process");
+        comma_input::input_monitoring_granted()
+    };
+    shortcuts.probe(&app);
+    granted || shortcuts.input_monitoring_effective()
+}
+
+/// Experimental: an active tap that swallows Fn so the Globe key action does not run (needs
+/// Accessibility). Off by default; the devtool turns it on.
+#[tauri::command]
+pub fn shortcuts_set_swallow(app: AppHandle, on: bool) -> AppResult<ShortcutsStatus> {
+    let s = shortcuts(&app)?;
+    s.set_swallow(&app, on);
+    s.status()
+}
+
+/// Quits and relaunches Comma, for a permission macOS applies only to a new process.
+#[tauri::command]
+pub fn app_restart(app: AppHandle) {
+    log::info!("restarting at the user's request");
+    app.restart();
 }
 
 #[tauri::command]
@@ -567,11 +587,29 @@ pub fn shortcuts_status(app: AppHandle) -> AppResult<ShortcutsStatus> {
 
 #[tauri::command]
 pub fn shortcuts_capture(app: AppHandle, owner: Option<WindowLabel>) -> AppResult<()> {
-    if owner.is_some_and(|o| o != WindowLabel::Onboarding) {
-        return Err(AppError::invalid("only onboarding can capture shortcuts"));
+    if owner == Some(WindowLabel::Bar) {
+        return Err(AppError::invalid("only onboarding and the hub can capture shortcuts"));
     }
     shortcuts(&app)?.set_capture(owner);
     Ok(())
+}
+
+/// Stops the Fn tap and the plugin shortcuts and registers everything again.
+#[tauri::command]
+pub fn shortcuts_restart(app: AppHandle) -> AppResult<ShortcutsStatus> {
+    log::info!("shortcuts: restart requested");
+    let s = shortcuts(&app)?;
+    s.restart(&app);
+    s.status()
+}
+
+/// Re-checks Input Monitoring and tries the tap even when the preflight says no.
+#[tauri::command]
+pub fn shortcuts_probe(app: AppHandle) -> AppResult<ShortcutsStatus> {
+    log::info!("shortcuts: probe requested");
+    let s = shortcuts(&app)?;
+    s.probe(&app);
+    s.status()
 }
 
 #[tauri::command]
@@ -595,6 +633,16 @@ pub async fn pipeline_run(
 ) -> AppResult<RunResult> {
     let args = RunArgs { mode, audio_base64, source, target_language, selected_text, record_ms, audio_secs };
     run::pipeline_run(&app, &state, args).await
+}
+
+/// Whether a run can start (keys or session), checked by the bar when the shortcut goes down.
+#[tauri::command]
+pub async fn pipeline_check(state: State<'_, AppState>, mode: Mode) -> AppResult<()> {
+    let ready = run::readiness(&state);
+    if let Err(e) = &ready {
+        log::warn!("{mode:?} cannot start: {}", e.reason.as_deref().unwrap_or(&e.message));
+    }
+    ready
 }
 
 #[tauri::command]
@@ -655,6 +703,70 @@ pub fn on_bar_menu(app: &AppHandle, id: &str) {
             after_settings_change(app, &before, &next);
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct LogTail {
+    pub path: String,
+    pub lines: Vec<String>,
+}
+
+pub const LOG_FILE: &str = "comma";
+const LOG_TAIL_BYTES: u64 = 256 * 1024;
+
+/// The last `lines` lines of the current log file.
+pub fn read_tail(path: &std::path::Path, lines: usize) -> AppResult<Vec<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(LOG_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf);
+    let mut all: Vec<&str> = text.lines().collect();
+    if start > 0 && !all.is_empty() {
+        // The first line was cut by the seek.
+        all.remove(0);
+    }
+    Ok(all[all.len().saturating_sub(lines)..].iter().map(|l| (*l).to_owned()).collect())
+}
+
+#[tauri::command]
+pub async fn log_tail(app: AppHandle, lines: Option<u32>) -> AppResult<LogTail> {
+    let dir = app.path().app_log_dir().map_err(|e| AppError::internal(e.to_string()))?;
+    let path = dir.join(format!("{LOG_FILE}.log"));
+    let lines = read_tail(&path, lines.unwrap_or(200).clamp(1, 1000) as usize)?;
+    Ok(LogTail { path: path.to_string_lossy().into_owned(), lines })
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+/// A line from a window (the bar's microphone errors, for instance). Windows send states and error
+/// names only, never text the user dictated or typed.
+#[tauri::command]
+pub fn log_write(level: LogLevel, scope: String, message: String) -> AppResult<()> {
+    if scope.len() > 32 || message.len() > 500 {
+        return Err(AppError::invalid("log line too long"));
+    }
+    let scope: String = scope.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    let message = message.replace(['\n', '\r'], " ");
+    match level {
+        LogLevel::Info => log::info!(target: "webview", "[{scope}] {message}"),
+        LogLevel::Warn => log::warn!(target: "webview", "[{scope}] {message}"),
+        LogLevel::Error => log::error!(target: "webview", "[{scope}] {message}"),
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -868,6 +980,21 @@ mod tests {
     }
 
     #[test]
+    fn log_tail_reads_the_last_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comma.log");
+        assert!(read_tail(&path, 10).unwrap().is_empty(), "no file yet");
+        std::fs::write(&path, (1..=50).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        assert_eq!(read_tail(&path, 3).unwrap(), ["line 48", "line 49", "line 50"]);
+        // Longer than the tail window: the cut first line is dropped.
+        let long: String = (0..40_000).map(|i| format!("entry {i:06}\n")).collect();
+        std::fs::write(&path, long).unwrap();
+        let tail = read_tail(&path, 100_000).unwrap();
+        assert!(tail.iter().all(|l| l.starts_with("entry ") && l.len() == 12));
+        assert_eq!(tail.last().unwrap(), "entry 039999");
+    }
+
+    #[test]
     fn app_error_serializes_as_code_and_message() {
         let json = serde_json::to_value(AppError::invalid("bad")).unwrap();
         assert_eq!(json, json!({ "code": "invalid_input", "message": "bad" }));
@@ -1001,6 +1128,42 @@ mod tests {
         assert!(runs.iter().all(|r| r.ok && r.model.is_some()));
         assert!(events.lock().unwrap().iter().any(|e| e.contains("run://stage") && e.contains("\"llm\"")));
         println!("events: {}", events.lock().unwrap().len());
+    }
+
+    /// The app's pipeline with the real ElevenLabs (key from the environment, held only in the
+    /// in-memory store, never the Keychain) and the rewrite on magpie:
+    /// `ELEVENLABS_API_KEY=... COMMA_TEST_WAV=speech.wav cargo test -p comma real_elevenlabs_run -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "needs ELEVENLABS_API_KEY, a speech WAV and magpie"]
+    async fn real_elevenlabs_run() {
+        let key = std::env::var("ELEVENLABS_API_KEY").expect("ELEVENLABS_API_KEY");
+        let wav = std::fs::read(std::env::var("COMMA_TEST_WAV").expect("COMMA_TEST_WAV")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir);
+        let models = llm_models_impl(&state, None).await.unwrap();
+        let model = std::env::var("COMMA_TEST_MODEL").unwrap_or_else(|_| models[0].clone());
+        secrets::set_secret(state.secrets.as_ref(), SecretName::Elevenlabs, &key).unwrap();
+        state.update_settings(&json!({ "llm": { "model": model, "reasoning_effort": "off" } })).unwrap();
+        assert!(run::readiness(&state).is_ok());
+        let args = run::RunArgs {
+            mode: Mode::Dictate,
+            audio_base64: base64::engine::general_purpose::STANDARD.encode(&wav),
+            source: run::RunSource::Onboarding,
+            target_language: None,
+            selected_text: None,
+            record_ms: None,
+            audio_secs: None,
+        };
+        let stages = std::sync::Mutex::new(Vec::<String>::new());
+        let emit = |_: &str, event: &str, payload: Value| {
+            if event == "run://stage" {
+                stages.lock().unwrap().push(format!("{} {}", payload["stage"], payload["ms"]));
+            }
+        };
+        let out = run::run_inner(&emit, &state, &args, "real", "onboarding", comma_voice::CancellationToken::new(), std::time::Instant::now()).await.unwrap();
+        println!("stt {} ms, llm {} ms, total {} ms, stages {:?}\n  raw: {}\n  refined: {}", out.stt_ms, out.llm_total_ms, out.total_ms, stages.lock().unwrap(), out.raw_text, out.refined_text);
+        assert!(!out.refined_text.is_empty());
+        assert_eq!(state.db.list_runs(&db::RunsQuery::default()).unwrap().len(), 1);
     }
 
     /// Account mode: an expired access token is refused with 401, refreshed once, and the call is

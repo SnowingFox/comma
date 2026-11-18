@@ -9,12 +9,15 @@ export type SttModel = {
   id: string;
   name: string;
   description: string;
-  /** List price per hour of audio, batch rate. */
-  usdPerHour: number;
+  /** List price per hour of audio, batch rate, where Comma knows it. */
+  usdPerHour?: number;
   recommended?: boolean;
 };
 
-/** ElevenLabs Scribe models. Keyterms from the dictionary add 20% to the price. */
+/**
+ * ElevenLabs Scribe models, the speech-to-text ids the API reports. Keyterms from the dictionary
+ * add 20% to the price.
+ */
 export const STT_MODELS: SttModel[] = [
   {
     id: "scribe_v3",
@@ -29,14 +32,29 @@ export const STT_MODELS: SttModel[] = [
     description: "The previous generation, at the same price.",
     usdPerHour: 0.2,
   },
+  {
+    id: "scribe_v2_medical",
+    name: "Scribe v2 Medical",
+    description: "Scribe v2 tuned for medical vocabulary.",
+  },
+  {
+    id: "scribe_v1",
+    name: "Scribe v1",
+    description: "Legacy model, kept for comparison.",
+  },
+  {
+    id: "scribe_v1_experimental",
+    name: "Scribe v1 Experimental",
+    description: "Legacy experimental variant of Scribe v1.",
+  },
 ];
 
 export function sttModel(id: string): SttModel | undefined {
   return STT_MODELS.find((m) => m.id === id);
 }
 
-export function formatUsdPerHour(usd: number): string {
-  return `$${usd.toFixed(2)}/h`;
+export function formatUsdPerHour(usd: number | undefined): string {
+  return usd === undefined ? "" : `$${usd.toFixed(2)}/h`;
 }
 
 // ---- LLM ----------------------------------------------------------------------------------------

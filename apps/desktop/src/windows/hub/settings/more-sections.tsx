@@ -25,6 +25,7 @@ import { errorMessage, invoke } from "../../../lib/ipc";
 import { queryKeys, useSettings, useUpdateSettings } from "../../../lib/queries";
 import { acceleratorWords } from "../../../lib/shortcut";
 import { useShortcutsStatus } from "../../../lib/shortcut-events";
+import { FnKeyTest } from "../../../components/fn-key-test";
 import { playTick, type TickKind } from "../../../lib/sounds";
 import { DATA_FLOWS } from "../../onboarding/steps/permissions";
 import { Group, Row, SectionHeader } from "./ui";
@@ -340,8 +341,9 @@ export function PrivacySection() {
 export function PermissionsSection() {
   return (
     <>
-      <SectionHeader title="Permissions" description="What macOS lets Comma do. Status updates live; each button opens the right pane in System Settings." />
-      <PermissionList />
+      <SectionHeader title="Permissions" description="What macOS lets Comma do. Status updates every second; Check again asks macOS now, and each button opens the right pane in System Settings." />
+      <PermissionList recheck />
+      <FnKeyTest />
       <p className="px-0.5 text-label text-muted-foreground">
         Without Accessibility, Comma copies the text and you paste it with ⌘V. Without Input Monitoring, the Fn shortcuts
         fall back to ordinary ones such as ⌥ Space.

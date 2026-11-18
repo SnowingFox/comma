@@ -290,6 +290,33 @@ mod tests {
         assert!(!r.m.is_recording());
     }
 
+    /// Hold to talk, release to process: Dictate and Translate stop (run) only after a real hold;
+    /// a tap under the threshold never stops, it is cancelled, so no empty run starts.
+    #[test]
+    fn hold_modes_run_on_release_and_taps_never_run() {
+        for mode in [Dictate, Translate] {
+            let mut r = Run::new();
+            assert_eq!(r.feed(0, Down(mode)), [Start(mode)], "the bar appears on press");
+            assert_eq!(r.feed(1_500, Up(mode)), [Stop(mode)], "release processes");
+
+            let mut r = Run::new();
+            r.feed(0, Down(mode));
+            assert!(r.feed(299, Up(mode)).is_empty(), "a tap waits for a possible second press");
+            assert_eq!(r.tick(599), [Cancel(mode)], "then it is dropped, never run");
+
+            let mut r = Run::new();
+            r.feed(0, Down(mode));
+            r.feed(100, Up(mode));
+            assert_eq!(r.feed(250, Down(mode)), [Switch { mode, hands_free: true }], "double press: hands-free");
+        }
+        // Ask Anything: press to start, press to stop; releasing does nothing.
+        let mut r = Run::new();
+        assert_eq!(r.feed(0, Down(Ask)), [Start(Ask)]);
+        assert!(r.feed(80, Up(Ask)).is_empty());
+        assert!(r.tick(2_000).is_empty());
+        assert_eq!(r.feed(3_000, Down(Ask)), [Stop(Ask)]);
+    }
+
     #[test]
     fn a_late_second_press_starts_a_new_recording() {
         let mut r = Run::new();

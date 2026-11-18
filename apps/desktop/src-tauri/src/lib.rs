@@ -19,9 +19,39 @@ use commands::AppState;
 use shortcuts::Shortcuts;
 use windows::WindowLabel;
 
+/// Rotate at 2 MB and keep five old files.
+const LOG_MAX_BYTES: u128 = 2_000_000;
+
+/// The app log (spec 4, Logging): lifecycle, listener and permission changes, run stages and
+/// errors. Never keys other than the configured shortcut events, typed or dictated text,
+/// transcripts, selected text or secrets.
+fn log_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
+    let mut builder = tauri_plugin_log::Builder::new()
+        .clear_targets()
+        .target(Target::new(TargetKind::LogDir { file_name: Some(commands::LOG_FILE.into()) }))
+        .max_file_size(LOG_MAX_BYTES)
+        .rotation_strategy(RotationStrategy::KeepSome(5))
+        .timezone_strategy(TimezoneStrategy::UseLocal)
+        .level(log::LevelFilter::Info)
+        // HTTP and webview internals are noise here, and could carry URLs with keys in a query.
+        .level_for("reqwest", log::LevelFilter::Warn)
+        .level_for("hyper", log::LevelFilter::Warn)
+        .level_for("hyper_util", log::LevelFilter::Warn)
+        .level_for("rustls", log::LevelFilter::Warn)
+        .level_for("tao", log::LevelFilter::Warn)
+        .level_for("wry", log::LevelFilter::Warn)
+        .level_for("tracing", log::LevelFilter::Warn);
+    if cfg!(debug_assertions) {
+        builder = builder.target(Target::new(TargetKind::Stdout));
+    }
+    builder.build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(log_plugin())
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -33,6 +63,13 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            log::info!(
+                "Comma {} starting ({} build, pid {}, {})",
+                app.package_info().version,
+                if cfg!(debug_assertions) { "debug" } else { "release" },
+                std::process::id(),
+                std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default()
+            );
             let config_dir = app.path().app_config_dir()?;
             let settings_path = config_dir.join(settings::FILE_NAME);
             let settings = settings::load(&settings_path);
@@ -45,6 +82,14 @@ pub fn run() {
             // Probing the Fn tap adds Comma to the Input Monitoring list; wait until onboarding has
             // explained why, unless it was finished before.
             let probe = settings.onboarding_completed;
+            log::info!(
+                "settings: mode {:?}, onboarding {}, shortcuts {} / {} / {}",
+                settings.mode,
+                if settings.onboarding_completed { "done".to_owned() } else { format!("at {:?}", settings.onboarding_step) },
+                settings.shortcuts.dictate,
+                settings.shortcuts.ask,
+                settings.shortcuts.translate
+            );
             let idle_bar = settings.feedback.show_idle_bar;
             app.manage(AppState::new(settings, settings_path, Box::new(secrets::KeychainStore), db));
             let shortcuts = Shortcuts::start(app.handle(), shortcut_settings, probe, Arc::new(run::on_action));
@@ -97,6 +142,13 @@ pub fn run() {
             commands::shortcuts_status,
             commands::shortcuts_capture,
             commands::shortcuts_suspend,
+            commands::shortcuts_restart,
+            commands::shortcuts_probe,
+            commands::shortcuts_set_swallow,
+            commands::pipeline_check,
+            commands::log_tail,
+            commands::log_write,
+            commands::app_restart,
             commands::hints_reset,
             commands::pipeline_run,
             commands::pipeline_cancel,
@@ -129,6 +181,7 @@ pub fn run() {
             let _ = tray::open_main(handle);
         }
         RunEvent::Exit => {
+            log::info!("Comma exiting");
             if let Some(state) = handle.try_state::<AppState>() {
                 ducking::restore(&state);
                 std::thread::sleep(std::time::Duration::from_millis(150));

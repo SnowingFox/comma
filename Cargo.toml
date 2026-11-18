@@ -16,6 +16,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "h
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+log = "0.4"
 tokio = { version = "1", features = ["macros", "time"] }
 tokio-util = "0.7"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

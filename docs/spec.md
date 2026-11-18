@@ -35,7 +35,9 @@ product.**
 1. Idle: hidden, or a 6 px dot at the bottom centre when "Show bar when idle" is on.
 2. Shortcut down (Dictate, default `Fn` held): a soft synthesised tick, the bar springs from the dot into a
    pill (~220 ms). Recording starts at once.
-3. Recording: live waveform from the mic level (10 bars, smoothed), mode icon, timer after 3 s. Release ends it.
+3. Recording: live waveform from the mic level (10 bars, smoothed), mode icon, timer after 3 s. Release ends it and
+   the run starts (Dictate and Translate are hold to talk). A tap shorter than 300 ms with no second press is not a
+   dictation: the bar goes away without the cancel sound and nothing runs.
    Pressing Fn twice within 300 ms starts hands-free mode (lock icon); the next press ends it. Esc cancels
    (short shake, fade out, nothing inserted).
 4. Processing: the waveform folds into a shimmering line; after 2 s a quiet "Still working" label fades in.
@@ -63,7 +65,15 @@ never again; all off with one switch in Settings):
 - After a few long dictations: "Press Fn twice to keep talking hands-free."
 - Speaking into a field Comma cannot paste into: the text is copied, with "Copied. Paste it with Cmd+V."
 - A clearly better microphone is connected: "Switch to <device>?" with Switch and Not now.
-- Permission lost or signed out: one line with a button that opens the fix.
+- Permission lost or signed out: one line with a button that opens the fix. The Input Monitoring hint shows once per
+  launch (Fn alone still works without it); once Comma asked for it in this run, or it is allowed but not applied,
+  the hint is "Relaunch Comma to finish turning on Input Monitoring" with Relaunch, never another prompt.
+- Fn is also the Globe key: when "Press 🌐 key to" does anything (its default with more than one input source is
+  Change Input Source, else Show Emoji & Symbols), Home and Settings > Permissions say so in one line with a button to
+  Keyboard settings. Comma reads this setting and never changes it.
+- Nothing to run with (Local mode without an ElevenLabs key or an LLM model): checked when the shortcut goes down; the
+  recording stops at once and the error card says what is missing ("Add your ElevenLabs key in Settings to start
+  dictating") with a Settings button that opens the right section.
 - Right-click on the bar opens a small menu: copy last result, output language, open Comma.
 
 ### 2.4 Onboarding (first launch; can be rerun from Settings)
@@ -119,10 +129,41 @@ App shell ported from Multica UI: collapsible left sidebar (logo, nav, footer), 
   most 50 characters and 5 words) and to the LLM prompt.
 - Usage: runs, audio minutes, STT cost, tokens per day (chart), breakdown by mode, model and app, p50/p95 per stage,
   CSV export.
-- Settings: Speech to text, LLM (provider, model picker from `/models`, reasoning effort Off/Low/Medium/High/Default,
+- Settings: Speech to text (ElevenLabs model: Scribe v3, recommended and the default; v2, the previous generation;
+  v2 Medical; v1, legacy; v1 Experimental; or any other model id), LLM (provider, model picker from `/models`, reasoning effort Off/Low/Medium/High/Default,
   temperature, max tokens, extra body JSON), Context, Shortcuts, Sounds and bar, Privacy (history retention, keep
   audio), Permissions, About (version, licenses, and the Multica attribution required by the Multica License: the
   Multica logo, name and copyright, "UI built with Multica UI").
+- Settings > Permissions: Microphone, Accessibility and Input Monitoring with live status (polled every second), Check
+  again (asks macOS now; for Input Monitoring it also starts a fresh Fn listener) and the button that opens the
+  System Settings pane. Input Monitoring reaches a running app only sometimes, so the row offers Restart Comma, and
+  says so plainly when it is allowed but not applied. "Test the Fn key" lights while the Fn listener reports Fn held
+  (`shortcut://keys`, never other keys); while it is on screen the hub captures the shortcuts so nothing records.
+  When "Press Globe key to" is set to anything but Do Nothing it explains that macOS also acts on Fn and links to
+  Keyboard settings. Home shows the same Input Monitoring note (with the fallback shortcut) until Fn works.
+
+Permission prompts appear only on a click (Allow, Turn on the microphone, a shortcut press that opens the microphone).
+Nothing prompts at launch or on a timer: creating the Fn tap and the preflights are silent checks, the onboarding
+microphone test opens the microphone by itself only once it is allowed, and `input_monitoring_request` calls
+`CGRequestListenEventAccess` at most once per process (later clicks open System Settings and offer a relaunch).
+
+### 2.6 Developer tools
+
+A DEV pill on the hub's right edge opens a dark panel with tabs (after the Multica devtool). On by default in
+development builds; in a release, five clicks on the version in Settings > About show a "Developer tools" switch there
+(stored in the app's local storage, shared by its windows). The panel records from the moment the hub loads, keeping
+the last 50 shortcut actions and 20 live runs; it keeps timings, states and error messages, never text.
+
+- Shortcuts: listener (Fn tap or fallback), the tap's state and whether it delivered events, the Input Monitoring
+  preflight, whether Input Monitoring was asked for this run, the Globe key setting, everything registered (Fn tap and
+  plugin), live lights for Fn held and the mode recording, the last 50 actions with timestamps, source and target,
+  Restart listener, Re-probe tap, and the experimental Swallow Fn switch (below).
+- Permissions: the three permissions live, Check again, Open settings, Restart Comma.
+- Runs: live stage timings and errors (`run://stage|done|error`) and the last 20 runs from the database (timings,
+  audio length, errors; no text).
+- Log: the tail of the app log, follow, filter, copy.
+- Onboarding: progress, open the onboarding window at any step, reset onboarding progress.
+- Bar: each bar state (mode, hands-free, hint, answer card, message) drawn on the real bar window until Stop preview.
 
 Copy: short, plain, second person, no exclamation marks.
 
@@ -147,7 +188,19 @@ comma/
 
 - Shortcuts: a modifier-state listener for Fn-based bindings (needs Input Monitoring; reads only modifier flags and the
   configured trigger keys, nothing else is kept), and `tauri-plugin-global-shortcut` for ordinary combinations and as
-  the fallback. Esc is listened for only while recording.
+  the fallback. Esc is listened for only while recording. macOS creates a listen-only tap even without Input
+  Monitoring and then filters what it delivers (Fn alone can still arrive, key presses such as Space or Esc do not),
+  so the Fn shortcuts count as working when the tap runs and either the preflight says yes or a key press reached the
+  tap (macOS delivers those only with the permission in effect; the preflight can stay "no" until relaunch). Until
+  then the fallbacks are registered next to the tap. The permission is re-checked every 2 s and a fresh tap starts
+  when it changes. Swallow Fn (experimental, off by default, devtool): an active HID-level tap, needing
+  Accessibility, that drops only the Fn key's own events while an Fn shortcut is configured and a Space that is the
+  trigger of a held Fn combination, re-enabled when macOS disables it; whether that stops the Globe key action
+  depends on macOS, so the Globe key line above stays the documented fix.
+- Logging (`tauri-plugin-log`): `~/Library/Logs/app.comma.desktop/comma.log`, rotated at 2 MB, five old files kept.
+  It records lifecycle, listener state changes (tap started, fallback, errors), permission changes, shortcut actions
+  (only the configured shortcuts), run stages, timings and errors. It never records any other key, typed or dictated
+  text, transcripts, selected text, API keys or tokens; windows log states and error names through `log_write`.
 - Windows: `bar` (transparent, decorations off, always on top, skip taskbar, non-focusable, positioned per monitor),
   `onboarding`, `hub`. Tray icon with Open Comma, mode toggles, Quit.
 - Pipeline (`pipeline.rs`, `stt.rs`, `llm.rs`, `prompts.rs`): ElevenLabs `POST /v1/speech-to-text` multipart
@@ -179,14 +232,19 @@ exists. Commands (frontend -> Rust) all return `Result<T, AppError { code, messa
 | `llm_models(base_url?) -> string[]`, `llm_test(base_url?, model?, reasoning_effort?)`, `stt_test()` | Connection tests (first-token latency, precise errors) |
 | `stt_transcribe(wav_base64) -> Transcription`, `refine_text(mode, text, target_language?, selected_text?) -> RefineResult` | Single stages, used by the onboarding microphone test |
 | `account_check(server_url?)`, `account_register`, `account_verify_email`, `account_resend_code`, `account_sign_in -> AccountStatus`, `account_status`, `account_sign_out`, `account_credits -> Credits` | Comma account; tokens stay in the Keychain, refreshed on 401 |
-| `shortcuts_status() -> ShortcutsStatus` | `listener` (`fn` or `fallback`), the shortcut each mode answers to now, registration errors, the Globe key setting |
-| `shortcuts_capture(owner)` | While the onboarding window is focused, shortcut events go to it instead of the bar |
+| `shortcuts_status() -> ShortcutsStatus` | `listener` (`fn` or `fallback`), the shortcut each mode answers to now, registration errors, the Globe key setting, `tap` (`running`, `off`, `failed`), `tap_error`, `tap_delivered`, `tap_keys` (a key press arrived: the permission is in effect), `requested`, `swallow`, `input_monitoring` (preflight), `restart_required`, `registered` |
+| `shortcuts_restart() -> ShortcutsStatus`, `shortcuts_probe() -> ShortcutsStatus` | Stop and set up the tap and the plugin shortcuts again; probe also tries the tap without the preflight (never prompts) |
+| `shortcuts_set_swallow(on) -> ShortcutsStatus` | Experimental active tap that swallows Fn; `swallow` is `off`, `on` or `unavailable` |
+| `shortcuts_capture(owner)` | While the onboarding window (try steps) or the hub (Fn key test) is focused, shortcut events go to it instead of the bar and nothing records |
 | `shortcuts_suspend(suspended)` | Shortcut recorder open: nothing is registered or matched, so its keys reach the window |
 | `pipeline_run({ mode, audio_base64, audio_secs?, source, target_language?, selected_text?, record_ms? }) -> RunResult` | Full run (Local or Comma account), WAV or Ogg/Opus; output (paste, copy, answer), history, hints; emits progress events |
 | `pipeline_cancel()` | Stops the run in flight |
+| `pipeline_check(mode)` | What a run needs before recording; `not_configured` with `reason` `missing_elevenlabs_key`, `missing_llm_model` or `signed_out` |
 | `output_insert(text) -> RunOutput`, `clipboard_copy(text)` | Answer card Insert and Copy |
 | `bar_layout(layout, interactive, escape?)`, `bar_menu()` | Bar window size and position (`hidden`, `dot`, `full`) on the screen with the mouse; the right-click menu |
 | `hint_take(kind) -> bool`, `hints_reset()` | Bar hints: may it show now (counted), and start the counts over |
+| `log_tail(lines?) -> { path, lines }`, `log_write(level, scope, message)` | The app log's last lines (devtool); a line from a window (states and error names only) |
+| `app_restart()` | Quit and relaunch (Input Monitoring applies to a new process) |
 | `runs_list({ search?, before?, limit? })`, `run_get(id)`, `run_delete(id)`, `runs_clear()`, `run_rerun(id)`, `run_audio(id)` | History |
 | `usage_summary(range)`, `usage_daily(range)`, `usage_export_csv(range) -> { path }` | Usage; `range` is `today`, `7d`, `30d`, `90d` |
 | `dictionary_list`, `dictionary_add(term)`, `dictionary_update(id, term)`, `dictionary_delete(id)`, `dictionary_import_csv(csv)` | Dictionary: local terms in Local mode, the server's in account mode |
@@ -195,15 +253,17 @@ Events (Rust -> frontend, and window to window):
 
 | Event | Payload | Notes |
 |---|---|---|
-| `shortcut://down`, `shortcut://up`, `shortcut://cancel` | `{ mode }` | To the bar, or to onboarding while it captures |
+| `shortcut://down`, `shortcut://up`, `shortcut://cancel` | `{ mode, quiet? }` | To the bar, or to the window that captures; `quiet` on a cancel for a tap too short to hold speech |
 | `shortcut://switch` | `{ mode, hands_free }` | Mode changed mid-recording (Fn, then Space), or hands-free locked |
-| `shortcut://keys` | `{ held }` | Only configured keys, for the keyboard test |
-| `run://stage` | `{ id, stage: stt\|llm\|paste, ms }` | |
+| `shortcut://keys` | `{ held }` | Only configured keys, for the keyboard tests; to every window |
+| `shortcut://action` | `{ action: start\|switch\|stop\|cancel\|hint, mode, hands_free?, quiet?, source: fn\|plugin, target: bar\|onboarding\|hub }` | Every action, to every window (devtool, Fn key test) |
+| `shortcut://status` | `ShortcutsStatus` | When the listener status changes |
+| `run://stage` | `{ id, stage: stt\|llm\|paste, ms }` | To the window that runs it, and to the hub (devtool) |
 | `run://delta` | `{ id, text }` | Streamed rewrite (Local mode) |
 | `run://done` | `{ id, result }` | |
 | `run://error` | `{ id, code, message, reason? }` | `reason` such as `quota_exceeded`, `signed_out` |
-| `bar://hint` | `{ kind }` | Hint to show (already counted) |
-| `bar://preview` | `{ state, mode?, message? }` | Dev only |
+| `bar://hint` | `{ kind }` | Hint to show (already counted); kinds include `input_monitoring` and `relaunch` |
+| `bar://preview` | `{ state, mode?, message?, hands_free?, done_label?, hint?, hint_actions?, answer? }` | Dev builds, or with developer tools on; `idle` ends the preview |
 | `history://changed` | `{ id? }` | The hub refetches |
 | `hub://open` | `{ page, section? }` | Bar -> hub: Details, Sign in |
 | `settings://changed` | `{}` | Another window or Rust changed settings |
@@ -212,7 +272,9 @@ Events (Rust -> frontend, and window to window):
 ## 4. Quality bar
 
 - `pnpm typecheck`, `pnpm test` (Vitest for the frontend), `cargo test` and `cargo clippy -- -D warnings` pass.
-- No secrets in logs, errors or the frontend. Keys are write-only from the UI.
+- No secrets in logs, errors or the frontend. Keys are write-only from the UI. The app log follows the rule in 3.2.
+- Release builds signed with the hardened runtime carry `Entitlements.plist`
+  (`com.apple.security.device.audio-input`); without it macOS denies the microphone without asking.
 - Release build: `pnpm tauri build --target aarch64-apple-darwin`, ad-hoc signed, `.dmg` output.
 
 ## 5. Server (`apps/server`)
