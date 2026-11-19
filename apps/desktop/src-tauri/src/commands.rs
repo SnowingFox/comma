@@ -688,9 +688,7 @@ pub fn bar_menu(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
 pub fn on_bar_menu(app: &AppHandle, id: &str) {
     let Some(state) = app.try_state::<AppState>() else { return };
     if id == windows::MENU_COPY {
-        let last = state.session.lock().ok().and_then(|s| s.last_text.clone());
-        let last = last.or_else(|| state.db.last_ok_run().ok().flatten().map(|r| r.refined_text));
-        if let Some(text) = last {
+        if let Some(text) = run::last_result(&state) {
             run::copy(&text);
         }
     } else if id == windows::MENU_OPEN {

@@ -4,7 +4,11 @@
 //! Both sources become `comma_input::Input`s that one dispatcher thread feeds to the state
 //! machine; its actions become `shortcut://*` events for the bar (or the window that captures them)
 //! and the context capture for the run. Esc is listened for only while a recording, a run or an
-//! answer card is open.
+//! answer card is open. During hands-free Dictate the tap is told to report a bare Space or Left
+//! Shift as the Ask or Translate shortcut (spec 2.3.2 mode switch).
+//!
+//! Paste last result (default Ctrl+Cmd+V) is an ordinary plugin shortcut, registered whenever it
+//! is turned on, and pastes the most recent result again (`run::paste_last`).
 //!
 //! macOS creates a listen-only tap even without Input Monitoring and then filters what it gets
 //! (flags-changed events such as Fn alone still arrive, key presses do not), so a running tap does
@@ -52,6 +56,11 @@ pub fn run_mode(mode: KeyMode) -> Mode {
         KeyMode::Ask => Mode::Ask,
         KeyMode::Translate => Mode::Translate,
     }
+}
+
+/// `Fn` or `Fn+<key>`, well formed or not.
+pub fn is_fn(accel: &str) -> bool {
+    accel == "Fn" || accel.starts_with("Fn+")
 }
 
 /// Settings validation: an Fn shortcut `comma-input` understands, or an accelerator the plugin
@@ -139,6 +148,8 @@ pub struct ShortcutsStatus {
     pub restart_required: bool,
     /// Everything registered now, Fn bindings on the tap and plugin shortcuts.
     pub registered: Vec<Registered>,
+    /// Paste last result could not be registered (taken by another app); `None` when it works or is off.
+    pub paste_last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -262,6 +273,7 @@ enum Msg {
     Held(Vec<&'static str>),
     Busy(bool),
     CardOpen(bool),
+    PasteLast,
 }
 
 struct Registration {
@@ -269,6 +281,8 @@ struct Registration {
     tap_error: Option<String>,
     /// Plugin shortcuts and the mode each starts.
     plugin: Vec<(Shortcut, Mode)>,
+    /// Paste last result, while registered.
+    paste_last: Option<Shortcut>,
     escape_registered: bool,
     /// `fn_trusted` at the last reconfigure: the tap also gets Esc then.
     trusted: bool,
@@ -332,6 +346,7 @@ fn empty_status() -> ShortcutsStatus {
         input_monitoring: false,
         restart_required: false,
         registered: Vec::new(),
+        paste_last_error: None,
     }
 }
 
@@ -365,6 +380,7 @@ impl Shortcuts {
             tap: None,
             tap_error: None,
             plugin: Vec::new(),
+            paste_last: None,
             escape_registered: false,
             trusted: false,
             swallow_failed: false,
@@ -550,6 +566,12 @@ impl Shortcuts {
             }
             return;
         }
+        if reg.paste_last.as_ref() == Some(shortcut) {
+            if event.state == ShortcutState::Pressed {
+                let _ = self.tx.send(Msg::PasteLast);
+            }
+            return;
+        }
         let Some(&(_, mode)) = reg.plugin.iter().find(|(s, _)| s == shortcut) else { return };
         let input = match event.state {
             ShortcutState::Pressed => Input::Down(key_mode(mode)),
@@ -623,6 +645,16 @@ impl Shortcuts {
             for (shortcut, _) in reg.plugin.drain(..) {
                 let _ = gs.unregister(shortcut);
             }
+            if let Some(shortcut) = reg.paste_last.take() {
+                let _ = gs.unregister(shortcut);
+            }
+            let mut paste_last_error = None;
+            if let Some(accel) = configured.paste_last().filter(|_| !suspended) {
+                match Shortcut::from_str(accel).map_err(|e| e.to_string()).and_then(|s| gs.register(s).map(|()| s).map_err(|e| e.to_string())) {
+                    Ok(shortcut) => reg.paste_last = Some(shortcut),
+                    Err(e) => paste_last_error = Some(format!("{accel} could not be registered. Another app may use it ({e})")),
+                }
+            }
             let mut errors = Vec::new();
             let mut registered = Vec::new();
             if tap_running && !suspended {
@@ -678,6 +710,7 @@ impl Shortcuts {
                 input_monitoring: granted,
                 restart_required: restart_required(any_fn, granted, tap),
                 registered,
+                paste_last_error,
             };
             (before, reg.status.clone())
         };
@@ -685,6 +718,9 @@ impl Shortcuts {
             log::info!("shortcuts: {}", describe(&after));
             for e in &after.errors {
                 log::warn!("shortcut for {:?} not registered: {}", e.mode, e.message);
+            }
+            if let Some(e) = &after.paste_last_error {
+                log::warn!("paste last result not registered: {e}");
             }
             emit_status(app, &after);
         }
@@ -716,11 +752,21 @@ impl Shortcuts {
         }
     }
 
+    /// Hands-free Dictate: the tap reports a bare Space or Left Shift as a mode switch.
+    fn set_bare_switch(&self, on: bool) {
+        if let Ok(reg) = self.reg.lock()
+            && let Some(tap) = &reg.tap
+        {
+            tap.set_bare_switch(on);
+        }
+    }
+
     fn dispatch(&self, app: &AppHandle, rx: mpsc::Receiver<Msg>, hook: ActionHook) {
         let mut machine = Machine::new(comma_input::Config::default());
         let mut busy = false;
         let mut card = false;
         let mut escape = false;
+        let mut bare = false;
         let mut source = Source::Fn;
         let mut target = Target::Bar;
         loop {
@@ -736,9 +782,6 @@ impl Shortcuts {
                 },
             };
             let now = Instant::now();
-            // A Cancel out of the double-press wait is a tap too short to hold speech: the bar goes
-            // away quietly (no cancel sound, no shake) and nothing runs.
-            let was_waiting = machine.deadline().is_some();
             let actions = match msg {
                 None => machine.tick(now),
                 Some(Msg::Held(held)) => {
@@ -753,6 +796,10 @@ impl Shortcuts {
                     card = open;
                     Vec::new()
                 }
+                Some(Msg::PasteLast) => {
+                    crate::run::paste_last(app);
+                    Vec::new()
+                }
                 Some(Msg::Inputs(inputs, from)) => {
                     source = from;
                     let mut out = Vec::new();
@@ -765,7 +812,8 @@ impl Shortcuts {
                                 let _ = app.emit_to(WindowLabel::Bar.as_str(), "shortcut://cancel", json!({ "mode": mode }));
                                 hook(app, &Action::Cancel(key_mode(mode)), Target::Bar);
                             }
-                            Input::Down(_) | Input::Up(_) if busy && !machine.is_recording() => {}
+                            // A run in flight: no new recording, but a finishing press still drains.
+                            Input::Down(_) if busy && machine.would_start(input) => {}
                             input => out.extend(machine.handle(input, now)),
                         }
                     }
@@ -776,9 +824,12 @@ impl Shortcuts {
                 if matches!(action, Action::Start(_)) {
                     target = self.target(app);
                 }
-                let quiet = was_waiting && matches!(action, Action::Cancel(_));
-                emit_action(app, action, target, source, quiet);
+                emit_action(app, action, target, source);
                 hook(app, action, target);
+            }
+            if machine.bare_switch() != bare {
+                bare = machine.bare_switch();
+                self.set_bare_switch(bare);
             }
             let want = machine.is_recording() || busy || card;
             if want != escape {
@@ -799,13 +850,17 @@ fn emit_status<R: Runtime>(app: &AppHandle<R>, status: &ShortcutsStatus) {
 }
 
 /// The `shortcut://action` payload: what the state machine decided, for the devtool and the key test.
-pub fn action_payload(action: &Action, target: Target, source: Source, quiet: bool) -> Option<serde_json::Value> {
-    let (name, mode, hands_free) = match action {
-        Action::Start(m) => ("start", *m, None),
-        Action::Switch { mode, hands_free } => ("switch", *mode, Some(*hands_free)),
-        Action::Stop(m) => ("stop", *m, None),
-        Action::Cancel(m) => ("cancel", *m, None),
-        Action::Hint(Hint::AskHold) => ("hint", KeyMode::Ask, None),
+/// A dismissed tap is a `cancel` with `quiet`: too short to hold speech, so the bar goes away
+/// without the cancel sound or shake and nothing runs.
+pub fn action_payload(action: &Action, target: Target, source: Source) -> serde_json::Value {
+    let (name, mode, hands_free, quiet, hint) = match action {
+        Action::Start(m) => ("start", *m, None, false, None),
+        Action::Switch { mode, hands_free } => ("switch", *mode, Some(*hands_free), false, None),
+        Action::Stop(m) => ("stop", *m, None, false, None),
+        Action::Cancel(m) => ("cancel", *m, None, false, None),
+        Action::Dismiss(m) => ("cancel", *m, None, true, None),
+        Action::Hint(Hint::AskHold) => ("hint", KeyMode::Ask, None, false, Some("ask_hold")),
+        Action::Hint(Hint::FinishWithFn) => ("hint", KeyMode::Dictate, None, false, Some("finish_with_fn")),
     };
     let mut payload = json!({ "action": name, "mode": run_mode(mode), "source": source, "target": target });
     if let Some(h) = hands_free {
@@ -814,21 +869,23 @@ pub fn action_payload(action: &Action, target: Target, source: Source, quiet: bo
     if quiet {
         payload["quiet"] = json!(true);
     }
-    Some(payload)
+    if let Some(h) = hint {
+        payload["hint"] = json!(h);
+    }
+    payload
 }
 
-fn emit_action<R: Runtime>(app: &AppHandle<R>, action: &Action, target: Target, source: Source, quiet: bool) {
-    if let Some(payload) = action_payload(action, target, source, quiet) {
-        log::info!("shortcut: {} {} via {} to {}", payload["action"], payload["mode"], payload["source"], payload["target"]);
-        let _ = app.emit("shortcut://action", payload);
-    }
+fn emit_action<R: Runtime>(app: &AppHandle<R>, action: &Action, target: Target, source: Source) {
+    let payload = action_payload(action, target, source);
+    log::info!("shortcut: {} {} via {} to {}", payload["action"], payload["mode"], payload["source"], payload["target"]);
+    let _ = app.emit("shortcut://action", payload);
     let (name, payload) = match action {
         Action::Start(m) => ("shortcut://down", json!({ "mode": run_mode(*m) })),
         Action::Switch { mode, hands_free } => ("shortcut://switch", json!({ "mode": run_mode(*mode), "hands_free": hands_free })),
         Action::Stop(m) => ("shortcut://up", json!({ "mode": run_mode(*m) })),
-        Action::Cancel(m) if quiet => ("shortcut://cancel", json!({ "mode": run_mode(*m), "quiet": true })),
+        Action::Dismiss(m) => ("shortcut://cancel", json!({ "mode": run_mode(*m), "quiet": true })),
         Action::Cancel(m) => ("shortcut://cancel", json!({ "mode": run_mode(*m) })),
-        Action::Hint(Hint::AskHold) => return,
+        Action::Hint(_) => return,
     };
     let _ = app.emit_to(target.label(), name, payload);
 }
@@ -838,7 +895,7 @@ mod tests {
     use super::*;
 
     fn sc(d: &str, a: &str, t: &str) -> ShortcutSettings {
-        ShortcutSettings { dictate: d.into(), ask: a.into(), translate: t.into() }
+        ShortcutSettings { dictate: d.into(), ask: a.into(), translate: t.into(), ..ShortcutSettings::default() }
     }
 
     #[test]
@@ -946,11 +1003,14 @@ mod tests {
 
     #[test]
     fn action_payloads() {
-        let p = action_payload(&Action::Switch { mode: KeyMode::Ask, hands_free: false }, Target::Bar, Source::Fn, false).unwrap();
+        let p = action_payload(&Action::Switch { mode: KeyMode::Ask, hands_free: false }, Target::Bar, Source::Fn);
         assert_eq!(p, json!({ "action": "switch", "mode": "ask", "source": "fn", "target": "bar", "hands_free": false }));
-        let p = action_payload(&Action::Cancel(KeyMode::Dictate), Target::Bar, Source::Fn, true).unwrap();
-        assert_eq!(p["quiet"], true, "a tap under the hold threshold");
-        let p = action_payload(&Action::Start(KeyMode::Dictate), Target::Hub, Source::Plugin, false).unwrap();
+        let p = action_payload(&Action::Dismiss(KeyMode::Dictate), Target::Bar, Source::Fn);
+        assert_eq!((p["action"].clone(), p["quiet"].clone()), (json!("cancel"), json!(true)), "a tap under the hold threshold");
+        assert_eq!(action_payload(&Action::Cancel(KeyMode::Dictate), Target::Bar, Source::Fn).get("quiet"), None);
+        let p = action_payload(&Action::Start(KeyMode::Dictate), Target::Hub, Source::Plugin);
         assert_eq!(p, json!({ "action": "start", "mode": "dictate", "source": "plugin", "target": "hub" }));
+        let p = action_payload(&Action::Hint(Hint::FinishWithFn), Target::Bar, Source::Fn);
+        assert_eq!((p["action"].clone(), p["hint"].clone()), (json!("hint"), json!("finish_with_fn")));
     }
 }

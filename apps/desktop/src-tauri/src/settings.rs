@@ -88,18 +88,33 @@ pub struct ShortcutSettings {
     pub dictate: String,
     pub ask: String,
     pub translate: String,
+    /// Pastes the most recent result again (spec 2.3.2). An ordinary accelerator; empty turns it off.
+    pub paste_last: String,
 }
+
+/// Spec 2.3.2: Ctrl+Cmd+V.
+pub const DEFAULT_PASTE_LAST: &str = "Control+Super+V";
 
 impl Default for ShortcutSettings {
     fn default() -> Self {
-        Self { dictate: "Fn".into(), ask: "Fn+Space".into(), translate: "Fn+ShiftLeft".into() }
+        Self { dictate: "Fn".into(), ask: "Fn+Space".into(), translate: "Fn+ShiftLeft".into(), paste_last: DEFAULT_PASTE_LAST.into() }
     }
 }
 
 impl ShortcutSettings {
     /// Used for an Fn-based shortcut while Input Monitoring is not allowed (and the phase 1 defaults).
     pub fn fallback() -> Self {
-        Self { dictate: "Alt+Space".into(), ask: "Alt+Shift+Space".into(), translate: "Alt+Control+Space".into() }
+        Self {
+            dictate: "Alt+Space".into(),
+            ask: "Alt+Shift+Space".into(),
+            translate: "Alt+Control+Space".into(),
+            paste_last: DEFAULT_PASTE_LAST.into(),
+        }
+    }
+
+    /// The paste-last shortcut, unless it is turned off.
+    pub fn paste_last(&self) -> Option<&str> {
+        Some(self.paste_last.as_str()).filter(|s| !s.is_empty())
     }
 
     pub fn get(&self, mode: comma_voice::prompts::Mode) -> &str {
@@ -256,6 +271,16 @@ impl Settings {
         if sc.dictate == sc.ask || sc.dictate == sc.translate || sc.ask == sc.translate {
             return Err(AppError::invalid("each mode needs its own shortcut"));
         }
+        if let Some(paste) = sc.paste_last() {
+            if paste.len() > 64 || paste.chars().any(char::is_whitespace) || crate::shortcuts::is_fn(paste) {
+                return Err(AppError::invalid("Paste last result needs an ordinary shortcut such as Control+Command+V"));
+            }
+            crate::shortcuts::validate(paste)?;
+            let fallback = ShortcutSettings::fallback();
+            if [&sc.dictate, &sc.ask, &sc.translate, &fallback.dictate, &fallback.ask, &fallback.translate].contains(&&sc.paste_last) {
+                return Err(AppError::invalid("Paste last result needs its own shortcut"));
+            }
+        }
         if self.privacy.history_days > 3650 || self.audio.microphone_id.len() > 256 {
             return Err(AppError::invalid("privacy.history_days or audio.microphone_id is out of range"));
         }
@@ -383,7 +408,7 @@ mod tests {
                 "stt": { "model_id": "scribe_v3" },
                 "llm": { "base_url": MAGPIE_BASE_URL, "model": "", "reasoning_effort": "default" },
                 "languages": { "spoken": [], "auto_detect": true, "translate_targets": [] },
-                "shortcuts": { "dictate": "Fn", "ask": "Fn+Space", "translate": "Fn+ShiftLeft" },
+                "shortcuts": { "dictate": "Fn", "ask": "Fn+Space", "translate": "Fn+ShiftLeft", "paste_last": "Control+Super+V" },
                 "account": { "server_url": DEFAULT_SERVER_URL, "email": "", "name": "", "access_expires_at": 0 },
                 "context_level": "app_and_selection",
                 "feedback": { "sounds": true, "show_idle_bar": false, "hints": true, "duck_audio": true },
@@ -420,6 +445,13 @@ mod tests {
         assert!(s.apply_patch(&json!({ "shortcuts": { "dictate": "Fn+Q" } })).is_err());
         assert!(s.apply_patch(&json!({ "shortcuts": { "ask": "Fn" } })).is_err(), "two modes on one shortcut");
         assert!(s.apply_patch(&json!({ "shortcuts": { "ask": "Alt+Nope" } })).is_err());
+        // Paste last result: an ordinary shortcut of its own, or off.
+        assert_eq!(s.apply_patch(&json!({ "shortcuts": { "paste_last": "" } })).unwrap().shortcuts.paste_last(), None);
+        assert!(s.apply_patch(&json!({ "shortcuts": { "paste_last": "Control+Alt+V" } })).is_ok());
+        assert!(s.apply_patch(&json!({ "shortcuts": { "paste_last": "Fn+MetaLeft" } })).is_err(), "Fn is for the modes");
+        assert!(s.apply_patch(&json!({ "shortcuts": { "paste_last": "V" } })).is_err());
+        assert!(s.apply_patch(&json!({ "shortcuts": { "paste_last": "Alt+Space" } })).is_err(), "the Dictate fallback");
+        assert!(s.apply_patch(&json!({ "shortcuts": { "dictate": "Control+Shift+D", "paste_last": "Control+Shift+D" } })).is_err());
         assert!(s.apply_patch(&json!({ "context_level": "everything" })).is_err());
         assert!(s.apply_patch(&json!({ "account": { "server_url": "localhost:8787" } })).is_err());
     }
@@ -436,6 +468,9 @@ mod tests {
         assert!(next.languages.auto_detect);
         assert_eq!(next.shortcuts.dictate, "Control+Shift+D");
         assert_eq!(next.shortcuts.ask, "Fn+Space");
+        // Settings saved before Paste last result existed get it on.
+        let old: ShortcutSettings = serde_json::from_value(json!({ "dictate": "Fn", "ask": "Fn+Space", "translate": "Fn+ShiftLeft" })).unwrap();
+        assert_eq!(old.paste_last(), Some(DEFAULT_PASTE_LAST));
     }
 
     #[test]
