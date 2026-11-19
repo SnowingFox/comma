@@ -76,6 +76,23 @@ never again; all off with one switch in Settings):
   dictating") with a Settings button that opens the right section.
 - Right-click on the bar opens a small menu: copy last result, output language, open Comma.
 
+### 2.3.2 Shortcut rules (all modes)
+
+| Shortcut | Mode | Behaviour |
+| --- | --- | --- |
+| `Fn` | Dictate | Hold to talk, release to process; double press for hands-free |
+| `Fn+Space` | Ask Anything | Press to start, press again (or press `Fn` alone) to finish |
+| `Fn+Left Shift` | Translate | Press to start, press again (or press `Fn` alone) to finish; holding also works (release finishes) |
+| `Ctrl+Cmd+V` | Paste last result | Pastes the most recent refined text again |
+| `Esc` | Any | Cancels the current recording, nothing is inserted |
+
+- Pressing `Fn` alone finishes any session that is running hands-free or in Ask Anything or Translate.
+- Mode switch while recording: during Dictate, pressing `Space` (while Fn is held, or once in hands-free) turns the
+  session into Ask Anything, and `Left Shift` turns it into Translate; the bar icon changes and the audio so far is
+  kept.
+- Ask Anything with selected text rewrites the selection and replaces it; without a selection the answer shows in
+  the answer card.
+
 ### 2.4 Onboarding (first launch; can be rerun from Settings)
 
 Its own 960 x 640 window, step indicator (`Set up > Try it > Done`), one task per step, an illustration made of our
