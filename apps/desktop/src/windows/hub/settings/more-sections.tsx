@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { HISTORY_DAYS, isFnAccelerator, type ContextLevel, type ShortcutSettings } from "@comma/shared/ipc";
+import { DEFAULT_SHORTCUTS, HISTORY_DAYS, MODE_SHORTCUTS, type ContextLevel, type ShortcutSettings } from "@comma/shared/ipc";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -24,6 +24,7 @@ import { historyKeys } from "../../../lib/history-queries";
 import { errorMessage, invoke } from "../../../lib/ipc";
 import { queryKeys, useSettings, useUpdateSettings } from "../../../lib/queries";
 import { acceleratorWords } from "../../../lib/shortcut";
+import { canSwitchModes, finishWords, modeHow, triggerWords } from "../../../lib/shortcut-rules";
 import { useShortcutsStatus } from "../../../lib/shortcut-events";
 import { FnKeyTest } from "../../../components/fn-key-test";
 import { playTick, type TickKind } from "../../../lib/sounds";
@@ -111,17 +112,15 @@ export function ContextSection() {
 
 // ---- Shortcuts ------------------------------------------------------------------------------------
 
-const SHORTCUT_ROWS: { mode: keyof ShortcutSettings; how: string }[] = [
-  { mode: "dictate", how: "Hold, speak, let go" },
-  { mode: "ask", how: "Press once to start, again to stop" },
-  { mode: "translate", how: "Hold, speak, let go" },
-];
-
 export function ShortcutsSection() {
   const shortcuts = useSettings().data?.shortcuts;
   const status = useShortcutsStatus().data;
+  const update = useUpdateSettings();
   const [editing, setEditing] = useState<keyof ShortcutSettings | null>(null);
-  const dictate = shortcuts?.dictate ?? "Fn";
+  const dictate = shortcuts?.dictate ?? DEFAULT_SHORTCUTS.dictate;
+  const finish = shortcuts ? finishWords(shortcuts) : "Fn";
+  const lastPaste = useRef(DEFAULT_SHORTCUTS.paste_last);
+  if (shortcuts?.paste_last) lastPaste.current = shortcuts.paste_last;
   return (
     <>
       <SectionHeader
@@ -131,17 +130,17 @@ export function ShortcutsSection() {
       <InputMonitoringNote />
       <GlobeKeyNote />
       <Group title="Modes">
-        {SHORTCUT_ROWS.map((r) => {
-          const configured = shortcuts?.[r.mode];
-          const active = status?.active[r.mode];
+        {MODE_SHORTCUTS.map((mode) => {
+          const configured = shortcuts?.[mode];
+          const active = status?.active[mode];
           const fallback = configured && active && active !== configured ? active : null;
-          const error = status?.errors.find((e) => e.mode === r.mode);
+          const error = status?.errors.find((e) => e.mode === mode);
           return (
-            <div key={r.mode} className="flex flex-col gap-1.5">
-              <Row label={MODE_NAMES[r.mode]} description={r.how}>
+            <div key={mode} className="flex flex-col gap-1.5">
+              <Row label={MODE_NAMES[mode]} description={modeHow(mode, { dictate })}>
                 <div className="flex items-center gap-3">
                   {configured ? <Keycaps accel={configured} size="sm" /> : null}
-                  <Button variant="ghost" size="sm" onClick={() => setEditing(r.mode)}>
+                  <Button variant="ghost" size="sm" onClick={() => setEditing(mode)}>
                     Change
                   </Button>
                 </div>
@@ -162,21 +161,64 @@ export function ShortcutsSection() {
       <Group title="While you talk">
         <Row
           label="Hands-free"
-          description={`Press ${acceleratorWords(dictate)} twice quickly (within 300 ms) to keep talking without holding it. Press once more to finish.`}
+          description={`Press ${acceleratorWords(dictate)} twice quickly (within 300 ms) to keep talking without holding it.`}
         >
           <span className="flex items-center gap-1">
             <Keycaps accel={dictate} size="sm" />
             <Keycaps accel={dictate} size="sm" />
           </span>
         </Row>
+        <Row label="Finish" description={`Press ${finish} on its own to finish hands-free, Ask Anything or Translate. It never starts a new recording.`}>
+          <Keycaps accel={dictate} size="sm" />
+        </Row>
+        {shortcuts && canSwitchModes(shortcuts) ? (
+          <div className="flex flex-col gap-1.5">
+            <Row
+              label="Switch mode"
+              description={`Dictating and changed your mind? Press ${triggerWords(shortcuts.ask)} for Ask Anything or ${triggerWords(shortcuts.translate)} for Translate, with Fn held or once in hands-free. What you said so far is kept.`}
+            >
+              <span className="text-label whitespace-nowrap text-muted-foreground">
+                {triggerWords(shortcuts.ask)} or {triggerWords(shortcuts.translate)}
+              </span>
+            </Row>
+            {status && status.swallow !== "on" ? (
+              <p className="text-caption text-muted-foreground">
+                Comma only listens to the keyboard, so the {triggerWords(shortcuts.ask)} you press also reaches the app you are in.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         <Row label="Cancel" description="Stops a recording or a run without inserting anything, and closes the answer card.">
           <Keycaps accel="Escape" size="sm" />
         </Row>
-        {isFnAccelerator(dictate) && shortcuts && isFnAccelerator(shortcuts.ask) && isFnAccelerator(shortcuts.translate) ? (
-          <Row label="Switch mode" description="Already holding Fn? Add the other key to switch to that mode in the same recording.">
-            <span className="text-label text-muted-foreground">Fn, then the key</span>
+      </Group>
+      <Group title="Paste">
+        <div className="flex flex-col gap-1.5">
+          <Row label={MODE_NAMES.paste_last} description="Pastes your most recent result again, in any app.">
+            <div className="flex items-center gap-3">
+              {shortcuts?.paste_last ? (
+                <>
+                  <Keycaps accel={shortcuts.paste_last} size="sm" />
+                  <Button variant="ghost" size="sm" onClick={() => setEditing("paste_last")}>
+                    Change
+                  </Button>
+                </>
+              ) : null}
+              <Switch
+                checked={!!shortcuts?.paste_last}
+                disabled={!shortcuts}
+                onCheckedChange={(on) => update.mutate({ shortcuts: { paste_last: on ? lastPaste.current : "" } }, { onError: fail })}
+                aria-label={MODE_NAMES.paste_last}
+              />
+            </div>
           </Row>
-        ) : null}
+          {status?.paste_last_error && shortcuts?.paste_last ? (
+            <p className="flex items-center gap-1.5 text-caption text-destructive">
+              <CircleAlert className="size-3.5 shrink-0" />
+              {status.paste_last_error}
+            </p>
+          ) : null}
+        </div>
       </Group>
       <ShortcutRecorder mode={editing ?? "dictate"} open={editing !== null} onOpenChange={(open) => !open && setEditing(null)} />
     </>

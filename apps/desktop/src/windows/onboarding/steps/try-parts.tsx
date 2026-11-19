@@ -61,21 +61,47 @@ function MiniWave({ level }: { level: number }) {
   );
 }
 
-/** One line under the sample: what to press, what is happening, or what went wrong. */
-export function RunStatus({ phase, level, accel, hold = true, idle }: { phase: VoicePhase; level: number; accel: string; hold?: boolean; idle?: ReactNode }) {
+/**
+ * One line under the sample: what to press, what is happening, or what went wrong. `hold` is a
+ * hold-to-talk mode (Dictate); otherwise `finish` names the key that finishes (Fn, spec 2.3.2) and
+ * `listening` can say more while it records.
+ */
+export function RunStatus({
+  phase,
+  level,
+  accel,
+  hold = true,
+  finish = "Fn",
+  idle,
+  listening,
+}: {
+  phase: VoicePhase;
+  level: number;
+  accel: string;
+  hold?: boolean;
+  finish?: string;
+  idle?: ReactNode;
+  listening?: string;
+}) {
   const content = match(phase)
     .with({ kind: "idle" }, () => (
       <>
         <span>{hold ? "Hold" : "Press"}</span>
         <Keycaps accel={accel} size="sm" />
-        <span>{idle ?? (hold ? "and speak, then let go." : "to start, and press again when you are done.")}</span>
+        <span>{idle ?? (hold ? "and speak, then let go." : `to start, then press ${finish} when you are done.`)}</span>
       </>
     ))
     .with({ kind: "recording" }, ({ handsFree }) => (
       <>
         <MiniWave level={level} />
         <span className="font-medium text-foreground">
-          {handsFree ? "Hands-free. Press once more when you are done." : hold ? "Listening. Let go when you are done." : "Listening. Press again when you are done."}
+          {hold && handsFree
+            ? `Hands-free. Press ${finish} once more when you are done.`
+            : hold
+              ? "Listening. Let go when you are done."
+              : handsFree || !listening
+                ? `Listening. Press ${finish} when you are done.`
+                : listening}
         </span>
         <span className="text-faint-foreground">Esc cancels</span>
       </>

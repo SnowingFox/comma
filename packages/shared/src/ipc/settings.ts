@@ -74,8 +74,14 @@ export const ShortcutSettings = z.object({
   dictate: Accelerator,
   ask: Accelerator,
   translate: Accelerator,
+  /** Pastes the most recent result again (spec 2.3.2). An ordinary accelerator, never Fn; empty turns it off. */
+  paste_last: z.union([z.literal(""), Accelerator]),
 });
 export type ShortcutSettings = z.infer<typeof ShortcutSettings>;
+
+/** The shortcuts that start a mode (everything in `ShortcutSettings` but Paste last result). */
+export type ModeShortcut = "dictate" | "ask" | "translate";
+export const MODE_SHORTCUTS: readonly ModeShortcut[] = ["dictate", "ask", "translate"];
 
 /** What a run may read from other apps (spec section 1): nothing, the focused app's name, or that plus the selection for Ask Anything. */
 export const ContextLevel = z.enum(["off", "app", "app_and_selection"]);
@@ -170,15 +176,16 @@ export const MAGPIE_BASE_URL = "http://127.0.0.1:3425/v1";
 /** A Comma server run locally with `docker compose up`. */
 export const DEFAULT_SERVER_URL = "http://127.0.0.1:8787";
 
-/** Spec 2.1 to 2.3: Fn held, Fn+Space pressed, Fn+Left Shift held. */
+/** Spec 2.3.2: Fn held, Fn+Space pressed, Fn+Left Shift pressed or held, Ctrl+Cmd+V pastes the last result. */
 export const DEFAULT_SHORTCUTS: ShortcutSettings = {
   dictate: "Fn",
   ask: "Fn+Space",
   translate: "Fn+ShiftLeft",
+  paste_last: "Control+Super+V",
 };
 
 /** Used for an Fn-based shortcut while Input Monitoring is not allowed. */
-export const FALLBACK_SHORTCUTS: ShortcutSettings = {
+export const FALLBACK_SHORTCUTS: Record<ModeShortcut, string> = {
   dictate: "Alt+Space",
   ask: "Alt+Shift+Space",
   translate: "Alt+Control+Space",

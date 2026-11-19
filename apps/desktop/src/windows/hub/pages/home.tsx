@@ -1,5 +1,5 @@
 import { DEFAULT_SHORTCUTS } from "@comma/shared/ipc";
-import { GlobeKeyNote, InputMonitoringNote } from "../../../components/shortcut-notes";
+import { AccessibilityNote, GlobeKeyNote, InputMonitoringNote } from "../../../components/shortcut-notes";
 import { Button } from "@multica/ui/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@multica/ui/components/ui/card";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
@@ -108,6 +108,7 @@ export function HomePage() {
   return (
     <Page title="Home">
       <div className="mx-auto flex max-w-4xl flex-col gap-6 px-8 py-7">
+        <AccessibilityNote />
         <InputMonitoringNote />
         <GlobeKeyNote />
         <div className="flex flex-col gap-1.5">

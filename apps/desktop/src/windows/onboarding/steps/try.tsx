@@ -12,6 +12,7 @@ import { useSettings, useUpdateSettings } from "../../../lib/queries";
 import { useVoiceRun } from "../../../lib/use-voice-run";
 import { useStepControls } from "../flow";
 import { Stacked } from "./layout";
+import { finishWords } from "../../../lib/shortcut-rules";
 import { NeedsKeys, RawToggle, RunStatus, Sweep, useTryReady } from "./try-parts";
 
 // ---- Dictate --------------------------------------------------------------------------------------
@@ -122,7 +123,9 @@ function selectionIn(root: HTMLElement | null): { start: number; end: number } |
 }
 
 export function TryAskStep() {
-  const accel = useSettings().data?.shortcuts.ask ?? DEFAULT_SHORTCUTS.ask;
+  const shortcuts = useSettings().data?.shortcuts ?? DEFAULT_SHORTCUTS;
+  const accel = shortcuts.ask;
+  const finish = finishWords(shortcuts);
   const { ready, missing } = useTryReady();
   const paragraphRef = useRef<HTMLDivElement>(null);
   const [text, setText] = useState<Edit>({ before: PARAGRAPH, inserted: "", after: "", n: 0 });
@@ -165,7 +168,10 @@ export function TryAskStep() {
   ];
 
   return (
-    <Stacked title="Ask Anything" lead="Press the shortcut once, say what you want, and press it again. With text selected, Comma changes it. With nothing selected, it answers.">
+    <Stacked
+      title="Ask Anything"
+      lead={`Press the shortcut once, say what you want, then press ${finish} to finish. With text selected, Comma changes it. With nothing selected, it answers.`}
+    >
       {!ready && missing ? (
         <NeedsKeys missing={missing} />
       ) : (
@@ -213,7 +219,7 @@ export function TryAskStep() {
                 </motion.div>
               ) : null}
             </AnimatePresence>
-            <RunStatus phase={phase} level={run.level} accel={accel} hold={false} />
+            <RunStatus phase={phase} level={run.level} accel={accel} hold={false} finish={finish} />
           </div>
           <ol className="flex flex-col gap-2.5">
             {tasks.map((t, i) => (
@@ -251,6 +257,7 @@ export function TryTranslateStep() {
   const settings = useSettings().data;
   const update = useUpdateSettings();
   const accel = settings?.shortcuts.translate ?? DEFAULT_SHORTCUTS.translate;
+  const finish = finishWords(settings?.shortcuts ?? DEFAULT_SHORTCUTS);
   const targets = settings?.languages.translate_targets ?? [];
   const target = targets[0];
   const { ready, missing } = useTryReady();
@@ -262,7 +269,10 @@ export function TryTranslateStep() {
   const shown = phase.kind === "done" ? (view === "raw" ? phase.result.raw_text : phase.result.refined_text) : "";
 
   return (
-    <Stacked title="Translate" lead="Speak in your language and Comma writes it in another. Pick up to three targets; the first is used.">
+    <Stacked
+      title="Translate"
+      lead={`Speak in your language and Comma writes it in another. Press the shortcut to start and ${finish} to finish, or hold it and let go. Pick up to three targets; the first is used.`}
+    >
       {!ready && missing ? (
         <NeedsKeys missing={missing} />
       ) : (
@@ -287,7 +297,19 @@ export function TryTranslateStep() {
             </p>
           </div>
           <div className="flex items-center justify-between gap-4">
-            {target ? <RunStatus phase={phase} level={run.level} accel={accel} idle={`and speak, then let go. Comma writes it in ${languageName(target)}.`} /> : <span />}
+            {target ? (
+              <RunStatus
+                phase={phase}
+                level={run.level}
+                accel={accel}
+                hold={false}
+                finish={finish}
+                idle={`to start, speak, then press ${finish}. Comma writes it in ${languageName(target)}.`}
+                listening={`Listening. Let go, or press ${finish}, when you are done.`}
+              />
+            ) : (
+              <span />
+            )}
             {phase.kind === "done" ? <RawToggle value={view} onChange={setView} /> : null}
           </div>
         </div>
