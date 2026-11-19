@@ -13,8 +13,10 @@
 //! Monitoring is in effect for this process even while the preflight still says no.
 //!
 //! [`TapMode::Swallow`] is an active tap instead (needs Accessibility): it drops the Fn key's own
-//! events while an Fn shortcut is configured, and a Space that is the trigger of a held Fn
-//! combination (see [`Matcher::consumes`]); every other event passes untouched.
+//! events while an Fn shortcut is configured, and a trigger key (Space, Left Shift) pressed as part
+//! of a shortcut or as a bare mode switch (see [`Matcher::consumes`]); every other event passes
+//! untouched. A listen-only tap cannot drop anything: there a Space used to switch modes is also
+//! typed into the focused app, and a Left Shift reaches it too.
 
 use crate::binding::{FnBindings, Matcher, MatcherOutput};
 
@@ -70,6 +72,12 @@ impl Shared {
     fn set_bindings(&self, bindings: FnBindings) {
         if let Ok(mut m) = self.matcher.lock() {
             m.set_bindings(bindings);
+        }
+    }
+
+    fn set_bare_switch(&self, on: bool) {
+        if let Ok(mut m) = self.matcher.lock() {
+            m.set_bare_switch(on);
         }
     }
 }
@@ -152,6 +160,11 @@ mod mac {
         /// Esc is matched only while this is on (during a recording, or with the answer card open).
         pub fn set_listen_escape(&self, on: bool) {
             self.state.shared.listen_escape.store(on, Ordering::Relaxed);
+        }
+
+        /// During hands-free Dictate: the next Space or Left Shift alone switches the mode.
+        pub fn set_bare_switch(&self, on: bool) {
+            self.state.shared.set_bare_switch(on);
         }
 
         /// Whether any keyboard event has reached the tap since it started.
@@ -282,10 +295,11 @@ mod mac {
                 _ => return false,
             };
             let listen_escape = state.shared.listen_escape.load(Ordering::Relaxed);
-            let (consume, out) = match state.shared.matcher.lock() {
-                Ok(mut m) => (state.shared.swallow && m.consumes(&raw), m.feed(raw, listen_escape)),
+            let out = match state.shared.matcher.lock() {
+                Ok(mut m) => m.feed(raw, listen_escape),
                 Err(_) => return false,
             };
+            let consume = state.shared.swallow && out.consume;
             if !out.is_empty() {
                 (state.shared.handler)(out);
             }
@@ -356,6 +370,7 @@ mod stub {
         }
         pub fn set_bindings(&self, _bindings: FnBindings) {}
         pub fn set_listen_escape(&self, _on: bool) {}
+        pub fn set_bare_switch(&self, _on: bool) {}
         pub fn delivered(&self) -> bool {
             false
         }
