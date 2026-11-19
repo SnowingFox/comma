@@ -21,6 +21,7 @@ export const MODE_NAMES: Record<keyof ShortcutSettings, string> = {
   dictate: "Dictate",
   ask: "Ask Anything",
   translate: "Translate",
+  paste_last: "Paste last result",
 };
 
 /** Fn shortcuts to choose from: Fn alone, then Fn with each key Comma's listener can match. */
@@ -28,7 +29,8 @@ const FN_CHOICES = ["Fn", ...FN_KEYS.map((k) => `Fn+${k}`)];
 
 /**
  * Picks a new shortcut for one mode: an Fn shortcut from the list (the webview cannot see Fn), or
- * an ordinary combination pressed while the dialog is open. Comma's own shortcuts are off while it
+ * an ordinary combination pressed while the dialog is open. Paste last result takes an ordinary
+ * combination only. Comma's own shortcuts are off while it
  * is open, so a combination already in use reaches the dialog. Only key events inside this window
  * are read.
  */
@@ -66,6 +68,7 @@ export function ShortcutRecorder({
   }, [open]);
 
   const current = settings?.shortcuts[mode];
+  const withFn = mode !== "paste_last";
   const takenBy = (accel: string) =>
     settings ? (Object.keys(MODE_NAMES) as (keyof ShortcutSettings)[]).find((m) => m !== mode && settings.shortcuts[m] === accel) : undefined;
   const taken = captured ? takenBy(captured) : undefined;
@@ -87,11 +90,11 @@ export function ShortcutRecorder({
         <DialogHeader>
           <DialogTitle>New {MODE_NAMES[mode]} shortcut</DialogTitle>
           <DialogDescription>
-            Pick an Fn shortcut, or press a combination with at least one of ⌃ ⌥ ⇧ ⌘. Your shortcuts are paused while
-            this is open.
+            {withFn ? "Pick an Fn shortcut, or press" : "Press"} a combination with at least one of ⌃ ⌥ ⇧ ⌘. Your shortcuts are
+            paused while this is open.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col gap-2">
+        <div className={cn("flex flex-col gap-2", !withFn && "hidden")}>
           <span className="text-label font-medium">With Fn</span>
           <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Fn shortcuts">
             {FN_CHOICES.map((accel) => {

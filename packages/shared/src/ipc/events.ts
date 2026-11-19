@@ -14,7 +14,10 @@ export type RunStage = z.infer<typeof RunStage>;
 export const ShortcutPayload = z.object({ mode: RunMode, quiet: z.boolean().optional() });
 export type ShortcutPayload = z.infer<typeof ShortcutPayload>;
 
-/** `shortcut://switch`: the running recording changed mode (Fn then Space) or locked hands-free (Fn pressed twice). */
+/**
+ * `shortcut://switch`: the running recording changed mode (Fn then Space, or Space alone while hands-free), locked
+ * hands-free (Fn pressed twice), or Translate keeps recording after a press (`hands_free`).
+ */
 export const ShortcutSwitchPayload = z.object({ mode: RunMode, hands_free: z.boolean() });
 export type ShortcutSwitchPayload = z.infer<typeof ShortcutSwitchPayload>;
 
@@ -58,6 +61,8 @@ export const ShortcutsStatus = z.object({
   restart_required: z.boolean(),
   /** Everything registered now: Fn bindings on the tap, ordinary shortcuts through the plugin. */
   registered: z.array(z.object({ mode: RunMode, shortcut: z.string(), via: z.enum(["fn", "plugin"]) })),
+  /** Paste last result could not be registered (taken by another app); null when it works or is off. */
+  paste_last_error: z.string().nullable(),
 });
 export type ShortcutsStatus = z.infer<typeof ShortcutsStatus>;
 
@@ -66,8 +71,10 @@ export const ShortcutActionPayload = z.object({
   action: z.enum(["start", "switch", "stop", "cancel", "hint"]),
   mode: RunMode,
   hands_free: z.boolean().optional(),
-  /** A cancel for a tap shorter than the hold threshold (no second press followed). */
+  /** A cancel for a tap shorter than the hold threshold, or a double press of Translate: nothing was said. */
   quiet: z.boolean().optional(),
+  /** For `hint`: which one (`ask_hold`, `finish_with_fn`). */
+  hint: z.string().max(32).optional(),
   /** `fn`: the Fn tap; `plugin`: an ordinary registered shortcut. */
   source: z.enum(["fn", "plugin"]),
   /** Where the down, up, cancel and switch events went. */
@@ -105,6 +112,10 @@ export const HintKind = z.enum([
   "signed_out",
   /** Input Monitoring was asked for or allowed, but only a relaunch applies it. */
   "relaunch",
+  /** Ask Anything or Translate was finished with the whole shortcut; Fn alone is enough (spec 2.3.2). */
+  "finish_with_fn",
+  /** The text was only copied because Accessibility is missing; once per launch, with a button to the pane. */
+  "paste_access",
 ]);
 export type HintKind = z.infer<typeof HintKind>;
 

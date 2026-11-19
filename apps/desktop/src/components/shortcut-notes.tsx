@@ -5,7 +5,7 @@ import { Button } from "@multica/ui/components/ui/button";
 import { CircleAlert, Keyboard } from "@multica/ui/icons";
 import { cn } from "@multica/ui/lib/utils";
 import { errorMessage, invoke } from "../lib/ipc";
-import { queryKeys, useSettings } from "../lib/queries";
+import { queryKeys, usePermissions, useSettings } from "../lib/queries";
 import { acceleratorWords } from "../lib/shortcut";
 import { useShortcutsStatus } from "../lib/shortcut-events";
 
@@ -113,6 +113,29 @@ export function InputMonitoringNote({ className }: { className?: string }) {
       }
     >
       Fn shortcuts need Input Monitoring.{meanwhile} Already allowed? Relaunch Comma.
+    </Note>
+  );
+}
+
+/**
+ * While Accessibility is missing, Comma can only copy the text: one line that stays until it is
+ * allowed, with the button to its pane (the bar says it once per launch, after a copy).
+ */
+export function AccessibilityNote({ className }: { className?: string }) {
+  const accessibility = usePermissions().data?.accessibility;
+  if (!accessibility || accessibility === "granted") return null;
+  return (
+    <Note
+      icon={CircleAlert}
+      tone="warn"
+      className={className}
+      action={
+        <Button size="sm" variant="outline" onClick={() => void invoke("open_settings_pane", { kind: "accessibility" }).catch((e: unknown) => toast.error(errorMessage(e)))}>
+          Allow Accessibility
+        </Button>
+      }
+    >
+      Comma copies your text instead of pasting it. Allow Accessibility so it can paste for you.
     </Note>
   );
 }

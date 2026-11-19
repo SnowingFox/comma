@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { BarState, RunMode, type BarPreviewPayload, type HintKind, type RunResult } from "@comma/shared/ipc";
+import { BarState, HintKind, RunMode, type BarPreviewPayload, type RunResult } from "@comma/shared/ipc";
 import { mountWindow } from "../../components/providers";
 import { allowInputMonitoring } from "../../components/shortcut-notes";
 import { OpusStream } from "../../lib/audio/ogg-opus";
@@ -7,11 +7,11 @@ import { encodeClip, listMicrophones, Recorder } from "../../lib/audio/recorder"
 import { emitTo, errorMessage, inTauri, invoke, IpcError, listen } from "../../lib/ipc";
 import { devtoolsEnabled } from "../../lib/devtool-store";
 import { useSettings, useUpdateSettings } from "../../lib/queries";
-import { acceleratorWords } from "../../lib/shortcut";
 import { useSettingsSync, useShortcutEvents } from "../../lib/shortcut-events";
 import { playTick } from "../../lib/sounds";
 import { MIN_SECS, SILENCE_PEAK } from "../../lib/use-voice-run";
 import { BarView, type BarAnswer, type BarHint } from "./bar-view";
+import { hintText } from "./hint-text";
 import { betterMicrophone } from "./microphones";
 import { createFakeLevel } from "./waveform";
 
@@ -41,19 +41,21 @@ const FIX_SECTION: Record<string, string> = { missing_elevenlabs_key: "speech", 
 
 /**
  * Dev: `bar.html?state=recording&mode=translate` opens straight into a state; `hands=1`, `done=Copied`,
- * `hint=<text>`, `actions=A,B` and `answer=<text>` add the rest of what the bar can show.
+ * `hint=<text or hint kind>`, `actions=A,B` and `answer=<text>` add the rest of what the bar can show.
  */
 function devInitial(): BarPreviewPayload | null {
   if (!import.meta.env.DEV || inTauri) return null;
   const params = new URLSearchParams(window.location.search);
   if (!params.get("state")) return null;
+  // `hint=finish_with_fn` (any hint kind) shows that hint's real text.
+  const kind = HintKind.safeParse(params.get("hint"));
   return {
     state: BarState.catch("idle").parse(params.get("state")),
     mode: RunMode.catch("dictate").parse(params.get("mode")),
     message: params.get("message") ?? undefined,
     hands_free: params.get("hands") === "1",
     done_label: params.get("done") ?? undefined,
-    hint: params.get("hint") ?? undefined,
+    hint: kind.success ? hintText(kind.data, "Fn") : (params.get("hint") ?? undefined),
     hint_actions: params.get("actions")?.split(","),
     answer: params.get("answer") ?? undefined,
   };
@@ -134,52 +136,31 @@ function useBarLoop() {
         void emitTo("hub", "hub://open", { page, section }).catch(() => {});
         void invoke("window_show", { label: "hub" }).catch(() => {});
       };
-      const texts: Record<HintKind, Omit<BarHint, "onDismiss">> = {
-        ask_hold: { text: "No need to hold. Press once, speak, press again." },
-        hands_free: {
-          text: dictate.startsWith("Fn") ? "Press Fn twice to keep talking hands-free." : `Press ${acceleratorWords(dictate)} twice to keep talking hands-free.`,
-        },
-        copied: { text: "Copied. Paste it with Cmd+V." },
-        microphone: {
-          text: `Switch to ${extra?.device?.label ?? "the other microphone"}?`,
-          actions: [
-            {
-              label: "Switch",
-              primary: true,
-              onClick: () => {
-                if (extra?.device) update.mutate({ audio: { microphone_id: extra.device.id } });
-                dismiss();
-              },
+      const openPane = (pane: "accessibility" | "microphone") => () => void invoke("open_settings_pane", { kind: pane }).finally(dismiss);
+      const actions: Partial<Record<HintKind, BarHint["actions"]>> = {
+        microphone: [
+          {
+            label: "Switch",
+            primary: true,
+            onClick: () => {
+              if (extra?.device) update.mutate({ audio: { microphone_id: extra.device.id } });
+              dismiss();
             },
-            { label: "Not now", onClick: dismiss },
-          ],
-        },
-        input_monitoring: {
-          text: "Fn+Space and Esc need Input Monitoring.",
-          actions: [{ label: "Allow", primary: true, onClick: () => void allowInputMonitoring().finally(dismiss) }],
-        },
-        relaunch: {
-          text: "Relaunch Comma to finish turning on Input Monitoring.",
-          actions: [
-            { label: "Relaunch", primary: true, onClick: () => void invoke("app_restart").finally(dismiss) },
-            { label: "Not now", onClick: dismiss },
-          ],
-        },
-        accessibility: {
-          text: "Comma needs Accessibility to paste. Until then it copies.",
-          actions: [{ label: "Open Settings", primary: true, onClick: () => void invoke("open_settings_pane", { kind: "accessibility" }).finally(dismiss) }],
-        },
-        microphone_denied: {
-          text: "Comma can't use the microphone.",
-          actions: [{ label: "Open Settings", primary: true, onClick: () => void invoke("open_settings_pane", { kind: "microphone" }).finally(dismiss) }],
-        },
-        signed_out: {
-          text: "You're signed out of Comma.",
-          actions: [{ label: "Sign in", primary: true, onClick: () => openHub("settings", "general") }],
-        },
+          },
+          { label: "Not now", onClick: dismiss },
+        ],
+        input_monitoring: [{ label: "Allow", primary: true, onClick: () => void allowInputMonitoring().finally(dismiss) }],
+        relaunch: [
+          { label: "Relaunch", primary: true, onClick: () => void invoke("app_restart").finally(dismiss) },
+          { label: "Not now", onClick: dismiss },
+        ],
+        accessibility: [{ label: "Open Settings", primary: true, onClick: openPane("accessibility") }],
+        paste_access: [{ label: "Allow", primary: true, onClick: openPane("accessibility") }],
+        microphone_denied: [{ label: "Open Settings", primary: true, onClick: openPane("microphone") }],
+        signed_out: [{ label: "Sign in", primary: true, onClick: () => openHub("settings", "general") }],
       };
       window.clearTimeout(hintTimer.current);
-      setHint({ ...texts[kind], onDismiss: dismiss });
+      setHint({ text: hintText(kind, dictate, extra?.device?.label), actions: actions[kind], onDismiss: dismiss });
       layout("full", true, viewRef.current.state === "recording");
       hintTimer.current = window.setTimeout(dismiss, HINT_MS);
     },

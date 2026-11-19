@@ -53,6 +53,10 @@ pub enum HintKind {
     SignedOut,
     /// Input Monitoring was allowed (or asked for) but only a relaunch applies it.
     Relaunch,
+    /// Ask Anything or Translate finished with the whole shortcut: Fn alone is enough.
+    FinishWithFn,
+    /// The text was only copied because Accessibility is missing. Once per launch.
+    PasteAccess,
 }
 
 impl HintKind {
@@ -67,6 +71,8 @@ impl HintKind {
             HintKind::MicrophoneDenied => "microphone_denied",
             HintKind::SignedOut => "signed_out",
             HintKind::Relaunch => "relaunch",
+            HintKind::FinishWithFn => "finish_with_fn",
+            HintKind::PasteAccess => "paste_access",
         }
     }
 
@@ -74,7 +80,7 @@ impl HintKind {
     /// (a permission, signing in) are not counted: they show whenever the problem is there.
     pub fn limit(self) -> Option<u32> {
         match self {
-            HintKind::AskHold | HintKind::Copied => Some(3),
+            HintKind::AskHold | HintKind::Copied | HintKind::FinishWithFn => Some(3),
             HintKind::HandsFree | HintKind::Microphone => Some(2),
             _ => None,
         }
@@ -177,7 +183,7 @@ pub fn on_action(app: &AppHandle, action: &Action, target: Target) {
             }
         }
         Action::Stop(_) => crate::ducking::restore(&state),
-        Action::Cancel(_) => {
+        Action::Cancel(_) | Action::Dismiss(_) => {
             crate::ducking::restore(&state);
             if let Ok(session) = state.session.lock()
                 && let Some(cancel) = &session.cancel
@@ -188,6 +194,13 @@ pub fn on_action(app: &AppHandle, action: &Action, target: Target) {
         Action::Hint(KeyHint::AskHold) => {
             if hint_take(&state, HintKind::AskHold).unwrap_or(false) {
                 emit_hint(app, HintKind::AskHold);
+            }
+        }
+        Action::Hint(KeyHint::FinishWithFn) => {
+            // Only worth teaching when Fn alone is a shortcut that finishes.
+            let fn_alone = state.snapshot().is_ok_and(|s| s.shortcuts.dictate == "Fn");
+            if fn_alone && target == Target::Bar && hint_take(&state, HintKind::FinishWithFn).unwrap_or(false) {
+                emit_hint(app, HintKind::FinishWithFn);
             }
         }
         Action::Switch { .. } => {}
@@ -248,6 +261,19 @@ fn capture(state: &AppState, mode: Mode) -> Captured {
 /// interrupt every dictation, and its button must not prompt again and again.
 static INPUT_MONITORING_HINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The Accessibility hint after a copy shows once per launch; Home keeps saying it meanwhile.
+static PASTE_ACCESS_HINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The hint for a result that was only copied: without Accessibility, why and how to fix it (once
+/// per launch); with it (no text field there), how to paste it, a few times ever.
+pub fn copied_hint(state: &AppState, accessibility: bool) -> AppResult<Option<HintKind>> {
+    if !accessibility {
+        let first = !PASTE_ACCESS_HINTED.swap(true, std::sync::atomic::Ordering::Relaxed);
+        return Ok(first.then_some(HintKind::PasteAccess));
+    }
+    Ok(hint_take(state, HintKind::Copied)?.then_some(HintKind::Copied))
+}
+
 /// Which Input Monitoring hint fits: none when the Fn shortcuts work; Relaunch once it was asked
 /// for or allowed in this process (asking again would not help); otherwise the Allow hint.
 pub fn input_monitoring_hint(trusted: bool, requested: bool, preflight: bool) -> Option<HintKind> {
@@ -261,12 +287,11 @@ pub fn input_monitoring_hint(trusted: bool, requested: bool, preflight: bool) ->
 /// Problems the user can fix, shown as the recording starts.
 fn start_hints(app: &AppHandle, state: &AppState) {
     let Ok(s) = state.snapshot() else { return };
+    // Missing Accessibility is said after the text was copied (`copied_hint`), when it matters.
     if s.mode == AppMode::Account && state.secrets.get(crate::secrets::ACCOUNT_REFRESH).ok().flatten().is_none() {
         emit_hint(app, HintKind::SignedOut);
-    } else if !comma_input::context::accessibility_trusted() {
-        emit_hint(app, HintKind::Accessibility);
     } else if let Some(shortcuts) = app.try_state::<Shortcuts>()
-        && [&s.shortcuts.dictate, &s.shortcuts.ask, &s.shortcuts.translate].iter().any(|a| a.starts_with("Fn"))
+        && [&s.shortcuts.dictate, &s.shortcuts.ask, &s.shortcuts.translate].iter().any(|a| crate::shortcuts::is_fn(a))
         && let Ok(status) = shortcuts.status()
         && let Some(kind) = input_monitoring_hint(shortcuts.fn_trusted(), status.requested, status.input_monitoring)
         && !INPUT_MONITORING_HINTED.swap(true, std::sync::atomic::Ordering::Relaxed)
@@ -661,8 +686,8 @@ pub async fn run_inner(
     state.db.insert_run(&record, keep)?;
     let _ = state.db.prune(settings.privacy.history_days, now_ms());
 
-    let hint = if output == RunOutput::Copied && hint_take(state, HintKind::Copied)? {
-        Some(HintKind::Copied)
+    let hint = if output == RunOutput::Copied {
+        copied_hint(state, comma_input::context::accessibility_trusted())?
     } else if args.mode == Mode::Dictate
         && args.source == RunSource::Bar
         && outcome.audio_secs >= LONG_DICTATION_SECS
@@ -851,25 +876,49 @@ where
 
 // ---- output -------------------------------------------------------------------------------------
 
-/// Pastes at the cursor of the app the run started in, or copies when Comma can't paste there.
+/// How a result goes out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputPlan {
+    /// Cmd+V, then the user's clipboard comes back.
+    Paste,
+    /// Cmd+V, and the text stays on the clipboard: the app did not show a text field, so the paste
+    /// may land nowhere, and the user can still paste it by hand.
+    PasteAndKeep,
+    /// No Accessibility: Comma cannot send Cmd+V, so it only copies.
+    Copy,
+}
+
+/// With Accessibility, Comma always pastes: whether the focused element takes text is only a
+/// guess (terminals, games and some web views say no and still accept a paste), so a "no" keeps
+/// the text on the clipboard instead of skipping the paste.
+pub fn output_plan(accessibility: bool, editable: Option<comma_input::context::Editable>) -> OutputPlan {
+    match (accessibility, editable) {
+        (false, _) => OutputPlan::Copy,
+        (true, Some(comma_input::context::Editable::No)) => OutputPlan::PasteAndKeep,
+        (true, _) => OutputPlan::Paste,
+    }
+}
+
+/// Pastes at the cursor of the app the run started in, or copies when Comma can't paste.
 pub async fn insert(state: &AppState, text: &str, pid: Option<i32>) -> RunOutput {
-    use comma_input::context::{self, Editable};
+    use comma_input::context;
     let text = text.to_owned();
-    let can_paste = context::accessibility_trusted() && pid.is_none_or(|p| context::focused_editable(p) != Editable::No);
     let paste_lock = state.paste_lock.clone();
     tokio::task::spawn_blocking(move || {
+        let trusted = context::accessibility_trusted();
+        let plan = output_plan(trusted, pid.filter(|_| trusted).map(context::focused_editable));
         let _one_at_a_time = paste_lock.lock();
-        output_blocking(&text, can_paste, pid)
+        output_blocking(&text, plan, pid)
     })
     .await
     .unwrap_or(RunOutput::Copied)
 }
 
 #[cfg(target_os = "macos")]
-fn output_blocking(text: &str, can_paste: bool, pid: Option<i32>) -> RunOutput {
-    use comma_input::paste::{MacKeys, MacPasteboard, copy_text, paste_and_restore};
+fn output_blocking(text: &str, plan: OutputPlan, pid: Option<i32>) -> RunOutput {
+    use comma_input::paste::{KeySender, MacKeys, MacPasteboard, copy_text, paste_and_restore};
     let pb = MacPasteboard;
-    if !can_paste {
+    if plan == OutputPlan::Copy {
         copy_text(&pb, text);
         return RunOutput::Copied;
     }
@@ -879,6 +928,17 @@ fn output_blocking(text: &str, can_paste: bool, pid: Option<i32>) -> RunOutput {
     {
         comma_input::context::activate(pid);
         std::thread::sleep(Duration::from_millis(120));
+    }
+    if plan == OutputPlan::PasteAndKeep {
+        log::info!("output: no text field reported; pasting and keeping the text on the clipboard");
+        copy_text(&pb, text);
+        return match MacKeys.send_paste() {
+            Ok(()) => RunOutput::Pasted,
+            Err(e) => {
+                log::warn!("paste failed ({e}); left on the clipboard");
+                RunOutput::Copied
+            }
+        };
     }
     match paste_and_restore(&pb, &MacKeys, text, RESTORE_AFTER, std::thread::sleep) {
         Ok(_) => RunOutput::Pasted,
@@ -891,8 +951,36 @@ fn output_blocking(text: &str, can_paste: bool, pid: Option<i32>) -> RunOutput {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn output_blocking(_text: &str, _can_paste: bool, _pid: Option<i32>) -> RunOutput {
+fn output_blocking(_text: &str, _plan: OutputPlan, _pid: Option<i32>) -> RunOutput {
     RunOutput::Copied
+}
+
+/// The most recent result: this launch's, or the newest successful run in history.
+pub fn last_result(state: &AppState) -> Option<String> {
+    let last = state.session.lock().ok().and_then(|s| s.last_text.clone());
+    last.or_else(|| state.db.last_ok_run().ok().flatten().map(|r| r.refined_text)).filter(|t| !t.trim().is_empty())
+}
+
+/// Paste last result (spec 2.3.2, default Ctrl+Cmd+V): pastes the most recent result again into
+/// the app in front, with the same rules as a run (copy and a hint without Accessibility).
+pub fn paste_last(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let Some(text) = last_result(&state) else {
+        log::info!("paste last result: nothing yet");
+        return;
+    };
+    let pid = comma_input::context::frontmost_app().map(|f| f.pid);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let output = insert(&state, &text, pid).await;
+        log::info!("paste last result: output {}", output.as_str());
+        if output == RunOutput::Copied
+            && let Ok(Some(kind)) = copied_hint(&state, comma_input::context::accessibility_trusted())
+        {
+            emit_hint(&app, kind);
+        }
+    });
 }
 
 /// The answer card's Insert: paste into the app the run came from.
@@ -1074,6 +1162,29 @@ mod tests {
         assert_eq!(input_monitoring_hint(false, true, false), Some(HintKind::Relaunch), "asked already: relaunch, not another prompt");
         assert_eq!(input_monitoring_hint(false, false, true), Some(HintKind::Relaunch), "allowed but not in effect");
         assert_eq!(serde_json::to_value(HintKind::Relaunch).unwrap(), "relaunch");
+    }
+
+    #[test]
+    fn with_accessibility_comma_always_pastes() {
+        use comma_input::context::Editable;
+        assert_eq!(output_plan(false, None), OutputPlan::Copy);
+        assert_eq!(output_plan(false, Some(Editable::Yes)), OutputPlan::Copy);
+        assert_eq!(output_plan(true, Some(Editable::Yes)), OutputPlan::Paste);
+        assert_eq!(output_plan(true, Some(Editable::Unknown)), OutputPlan::Paste);
+        assert_eq!(output_plan(true, None), OutputPlan::Paste);
+        assert_eq!(output_plan(true, Some(Editable::No)), OutputPlan::PasteAndKeep, "no field reported: paste anyway, keep a copy");
+    }
+
+    #[test]
+    fn a_copy_without_accessibility_explains_once_per_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir);
+        assert_eq!(copied_hint(&state, false).unwrap(), Some(HintKind::PasteAccess));
+        assert_eq!(copied_hint(&state, false).unwrap(), None, "once per launch");
+        assert_eq!(HintKind::PasteAccess.limit(), None, "a fix, not a counted tip");
+        assert_eq!(copied_hint(&state, true).unwrap(), Some(HintKind::Copied), "allowed, no text field: how to paste");
+        assert_eq!(serde_json::to_value(HintKind::PasteAccess).unwrap(), "paste_access");
+        assert_eq!(serde_json::to_value(HintKind::FinishWithFn).unwrap(), "finish_with_fn");
     }
 
     #[test]

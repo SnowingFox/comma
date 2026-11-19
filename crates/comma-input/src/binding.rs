@@ -9,6 +9,9 @@
 //!   Fn+arrow cancels a recording), and its keycode is dropped on the spot.
 //! - It reads only the keycode, the autorepeat flag and the modifier flags, never characters.
 //! - Esc is reported only while the caller asks for it (`listen_escape`, during a recording).
+//! - A configured trigger key without Fn (Space, Left Shift) is reported only while the caller
+//!   asks for it (`set_bare_switch`, during hands-free Dictate), and only once: it switches the
+//!   mode (spec 2.3.2).
 //!
 //! Fn itself is recognised only from a flags-changed event for the Fn key (keycode 63) and its
 //! flag. Arrow keys, F-keys and others carry the same flag on their own events and must not count.
@@ -180,6 +183,8 @@ pub struct MatcherOutput {
     /// The configured keys held now, set only when that changed. Lists only `Fn` and trigger keys,
     /// and only while Fn is down.
     pub held: Option<Vec<&'static str>>,
+    /// What [`Matcher::consumes`] said about this event before it was fed: an active tap drops it.
+    pub consume: bool,
 }
 
 impl MatcherOutput {
@@ -199,6 +204,13 @@ pub struct Matcher {
     /// Modes whose combination went down and has not come up.
     active: Vec<Mode>,
     last_held: Vec<&'static str>,
+    /// Hands-free Dictate: the next Ask or Translate trigger key alone is that mode's shortcut.
+    bare_switch: bool,
+    /// The trigger key that made a bare switch, until it comes up, and the mode it chose.
+    bare_held: Option<(FnKey, Mode)>,
+    /// Trigger keys whose press was consumed, so their release is consumed too (and only then:
+    /// an app never sees a release without its press, or a press without its release).
+    swallowed: Vec<FnKey>,
 }
 
 impl Matcher {
@@ -206,29 +218,98 @@ impl Matcher {
         Self { bindings, ..Self::default() }
     }
 
-    /// New bindings. Held state is dropped so nothing stays half pressed.
+    /// New bindings. Held state is dropped so nothing stays half pressed; the bare switch stays.
     pub fn set_bindings(&mut self, bindings: FnBindings) {
+        let bare_switch = self.bare_switch;
         *self = Self::new(bindings);
+        self.bare_switch = bare_switch;
     }
 
-    /// Whether an active tap should swallow `ev` (call before [`Matcher::feed`]): the Fn key's own
-    /// flags-changed events while an Fn shortcut is configured, so macOS's Globe key action does
-    /// not run, and Space while it is the trigger of a held Fn combination, so no space is typed.
-    /// Everything else passes through. Modifier triggers (Shift and so on) always pass, so other
-    /// apps never see a modifier stuck down.
+    /// While on (hands-free Dictate), the next Ask or Translate trigger key pressed without Fn
+    /// (Space, Left Shift) is reported as that mode's shortcut. Turns itself off once used.
+    pub fn set_bare_switch(&mut self, on: bool) {
+        self.bare_switch = on;
+    }
+
+    pub fn bare_switch(&self) -> bool {
+        self.bare_switch
+    }
+
+    /// The mode a trigger key pressed without Fn switches to now, if any.
+    fn bare_target(&self, key: FnKey) -> Option<Mode> {
+        if !self.bare_switch || self.fn_down {
+            return None;
+        }
+        self.bindings.iter().find(|(m, b)| *m != Mode::Dictate && b.trigger() == Some(key)).map(|(m, _)| m)
+    }
+
+    /// Whether an active tap should swallow `ev` (call before [`Matcher::feed`], which also reports
+    /// it): the Fn key's own flags-changed events while an Fn shortcut is configured, so macOS's
+    /// Globe key action does not run; and a trigger key (Space, Left Shift) pressed as part of a
+    /// shortcut, with Fn or as a bare switch, so no space is typed and no input method toggles on
+    /// Shift. A trigger's release is swallowed exactly when its press was. Everything else passes.
     pub fn consumes(&self, ev: &RawEvent) -> bool {
         if self.bindings.is_empty() {
             return false;
         }
+        let pressed = |key: FnKey| self.swallowed.contains(&key) || self.fn_down || self.bare_target(key).is_some();
         match *ev {
-            RawEvent::FlagsChanged { keycode, .. } => keycode == FN_KEYCODE,
-            RawEvent::KeyDown { keycode: SPACE_KEYCODE, .. } => self.bindings.is_trigger(FnKey::Space) && self.fn_down,
-            RawEvent::KeyUp { keycode: SPACE_KEYCODE } => self.bindings.is_trigger(FnKey::Space) && self.triggers.contains(&FnKey::Space),
+            RawEvent::FlagsChanged { keycode: FN_KEYCODE, .. } => true,
+            RawEvent::FlagsChanged { keycode, flags } => match self.trigger_change(keycode, flags) {
+                Some((key, true)) => pressed(key),
+                Some((key, false)) => self.swallowed.contains(&key),
+                None => false,
+            },
+            RawEvent::KeyDown { keycode: SPACE_KEYCODE, .. } if self.bindings.is_trigger(FnKey::Space) => pressed(FnKey::Space),
+            RawEvent::KeyUp { keycode: SPACE_KEYCODE } => self.swallowed.contains(&FnKey::Space),
             _ => false,
         }
     }
 
+    /// A flags-changed event of a configured modifier trigger: the key and whether it is down.
+    fn trigger_change(&self, keycode: u16, flags: u64) -> Option<(FnKey, bool)> {
+        let key = FnKey::from_keycode(keycode).filter(|k| self.bindings.is_trigger(*k))?;
+        key.device_bit().map(|bit| (key, flags & bit != 0))
+    }
+
+    /// Remembers which trigger presses were swallowed, so their releases are too.
+    fn note_swallowed(&mut self, ev: &RawEvent, consume: bool) {
+        let change = match *ev {
+            RawEvent::FlagsChanged { keycode, flags } if keycode != FN_KEYCODE => self.trigger_change(keycode, flags),
+            RawEvent::KeyDown { keycode: SPACE_KEYCODE, repeat: false } if self.bindings.is_trigger(FnKey::Space) => Some((FnKey::Space, true)),
+            RawEvent::KeyUp { keycode: SPACE_KEYCODE } => Some((FnKey::Space, false)),
+            _ => None,
+        };
+        match change {
+            Some((key, true)) if consume && !self.swallowed.contains(&key) => self.swallowed.push(key),
+            Some((key, false)) => self.swallowed.retain(|k| *k != key),
+            _ => {}
+        }
+    }
+
+    /// A trigger key pressed or released: a bare switch, or part of an Fn combination.
+    fn on_key(&mut self, key: FnKey, down: bool, inputs: &mut Vec<Input>) {
+        if down && let Some(mode) = self.bare_target(key) {
+            if !self.triggers.contains(&key) && self.bare_held.is_none() {
+                self.bare_switch = false;
+                self.bare_held = Some((key, mode));
+                inputs.push(Input::Down(mode));
+            }
+            return;
+        }
+        if !down && let Some((held, mode)) = self.bare_held
+            && held == key
+        {
+            self.bare_held = None;
+            inputs.push(Input::Up(mode));
+            return;
+        }
+        self.on_trigger(key, down, inputs);
+    }
+
     pub fn feed(&mut self, ev: RawEvent, listen_escape: bool) -> MatcherOutput {
+        let consume = self.consumes(&ev);
+        self.note_swallowed(&ev, consume);
         let mut inputs = Vec::new();
         match ev {
             RawEvent::FlagsChanged { keycode: FN_KEYCODE, flags } => {
@@ -244,19 +325,17 @@ impl Matcher {
                 }
             }
             RawEvent::FlagsChanged { keycode, flags } => {
-                if let Some(key) = FnKey::from_keycode(keycode).filter(|k| self.bindings.is_trigger(*k))
-                    && let Some(bit) = key.device_bit()
-                {
-                    self.on_trigger(key, flags & bit != 0, &mut inputs);
+                if let Some((key, down)) = self.trigger_change(keycode, flags) {
+                    self.on_key(key, down, &mut inputs);
                 }
             }
             RawEvent::KeyDown { keycode: SPACE_KEYCODE, repeat } if self.bindings.is_trigger(FnKey::Space) => {
                 if !repeat {
-                    self.on_trigger(FnKey::Space, true, &mut inputs);
+                    self.on_key(FnKey::Space, true, &mut inputs);
                 }
             }
             RawEvent::KeyUp { keycode: SPACE_KEYCODE } if self.bindings.is_trigger(FnKey::Space) => {
-                self.on_trigger(FnKey::Space, false, &mut inputs);
+                self.on_key(FnKey::Space, false, &mut inputs);
             }
             RawEvent::KeyDown { keycode: ESCAPE_KEYCODE, .. } if listen_escape => inputs.push(Input::Escape),
             RawEvent::KeyDown { repeat, .. } => {
@@ -272,7 +351,7 @@ impl Matcher {
             self.last_held = held.clone();
             held
         });
-        MatcherOutput { inputs, held }
+        MatcherOutput { inputs, held, consume }
     }
 
     fn on_fn_down(&mut self, inputs: &mut Vec<Input>) {
@@ -489,14 +568,93 @@ mod tests {
         assert!(m.consumes(&space_up));
         m.feed(space_up, false);
         assert!(!m.consumes(&space_up));
-        // Modifiers, arrows and letters always pass, even with Fn held.
+        // Arrows, Esc and letters always pass, even with Fn held.
         m.feed(fn_down(), false);
-        assert!(!m.consumes(&RawEvent::FlagsChanged { keycode: SHIFT_L, flags: FN_FLAG | SHIFT_L_FLAGS }));
         assert!(!m.consumes(&RawEvent::KeyDown { keycode: LEFT_ARROW, repeat: false }));
         assert!(!m.consumes(&RawEvent::KeyDown { keycode: ESCAPE_KEYCODE, repeat: false }));
+        assert!(!m.consumes(&RawEvent::FlagsChanged { keycode: 60, flags: FN_FLAG | 0x4 | 0x2_0000 }), "Right Shift is no trigger");
         // Nothing configured on Fn: nothing is swallowed.
         let m = Matcher::new(FnBindings::default());
         assert!(!m.consumes(&fn_down()));
+    }
+
+    /// Left Shift as part of Fn+Left Shift is swallowed (no input method toggles on it), and its
+    /// release exactly when its press was, so no app sees Shift stuck down or up.
+    #[test]
+    fn a_trigger_modifier_is_swallowed_in_pairs() {
+        let mut m = defaults();
+        let shift_down = |fn_flag| RawEvent::FlagsChanged { keycode: SHIFT_L, flags: fn_flag | SHIFT_L_FLAGS };
+        let shift_up = |fn_flag| RawEvent::FlagsChanged { keycode: SHIFT_L, flags: fn_flag };
+        m.feed(fn_down(), false);
+        let out = m.feed(shift_down(FN_FLAG), false);
+        assert!(out.consume && out.inputs == [Down(Translate)]);
+        m.feed(fn_up(), false);
+        assert!(m.feed(shift_up(0), false).consume, "released after Fn: still swallowed, its press was");
+
+        // Shift first, then Fn: the press reached the apps, so its release must too.
+        let mut m = defaults();
+        assert!(!m.feed(shift_down(0), false).consume);
+        m.feed(RawEvent::FlagsChanged { keycode: FN_KEYCODE, flags: FN_FLAG | SHIFT_L_FLAGS }, false);
+        assert!(!m.feed(shift_up(FN_FLAG), false).consume);
+
+        // Typing a capital letter without Fn: nothing swallowed.
+        let mut m = defaults();
+        assert!(!m.feed(shift_down(0), false).consume);
+        assert!(!m.feed(shift_up(0), false).consume);
+    }
+
+    /// A Space typed without Fn passes, press and release; a stale release was swallowed before.
+    #[test]
+    fn a_plain_space_passes_press_and_release() {
+        let mut m = defaults();
+        assert!(!m.feed(RawEvent::KeyDown { keycode: SPACE_KEYCODE, repeat: false }, false).consume);
+        m.feed(fn_down(), false);
+        assert!(!m.feed(RawEvent::KeyUp { keycode: SPACE_KEYCODE }, false).consume, "its press was not swallowed");
+    }
+
+    /// Hands-free Dictate: Space or Left Shift alone is that mode's shortcut, once, and swallowed.
+    #[test]
+    fn bare_switch_reports_a_trigger_once() {
+        let space_down = RawEvent::KeyDown { keycode: SPACE_KEYCODE, repeat: false };
+        let space_up = RawEvent::KeyUp { keycode: SPACE_KEYCODE };
+        let mut m = defaults();
+        assert!(m.feed(space_down, false).inputs.is_empty(), "off: typing a space");
+        m.feed(space_up, false);
+
+        m.set_bare_switch(true);
+        assert!(m.consumes(&space_down));
+        let out = m.feed(space_down, false);
+        assert_eq!((out.inputs, out.consume, out.held), (vec![Down(Ask)], true, None), "no keys listed without Fn");
+        assert!(!m.bare_switch(), "used up");
+        assert!(m.feed(RawEvent::KeyDown { keycode: SPACE_KEYCODE, repeat: true }, false).consume, "its repeats too");
+        let out = m.feed(space_up, false);
+        assert_eq!((out.inputs, out.consume), (vec![Up(Ask)], true));
+        let out = m.feed(space_down, false);
+        assert!(out.inputs.is_empty() && !out.consume, "the next space is typed");
+        m.feed(space_up, false);
+
+        let mut m = defaults();
+        m.set_bare_switch(true);
+        let out = m.feed(RawEvent::FlagsChanged { keycode: SHIFT_L, flags: SHIFT_L_FLAGS }, false);
+        assert_eq!((out.inputs, out.consume), (vec![Down(Translate)], true));
+        let out = m.feed(RawEvent::FlagsChanged { keycode: SHIFT_L, flags: 0 }, false);
+        assert_eq!((out.inputs, out.consume), (vec![Up(Translate)], true));
+
+        // Fn still selects Dictate as usual while armed; other keys stay anonymous and unreported.
+        let mut m = defaults();
+        m.set_bare_switch(true);
+        assert!(m.feed(RawEvent::KeyDown { keycode: DELETE_FORWARD, repeat: false }, false).is_empty());
+        assert_eq!(inputs(&mut m, fn_down()), [Down(Dictate)]);
+        assert_eq!(inputs(&mut m, space_down), [Down(Ask)], "with Fn held it is the ordinary combination");
+        assert!(m.bare_switch(), "not used by a combination");
+        m.set_bindings(defaults().bindings);
+        assert!(m.bare_switch(), "kept across new bindings");
+
+        // A Space that is no trigger never switches.
+        let mut m = Matcher::new(FnBindings { dictate: Some(FnBinding::Fn), ..Default::default() });
+        m.set_bare_switch(true);
+        let out = m.feed(space_down, false);
+        assert!(out.inputs.is_empty() && !out.consume);
     }
 
     #[test]

@@ -36,8 +36,8 @@ product.**
 2. Shortcut down (Dictate, default `Fn` held): a soft synthesised tick, the bar springs from the dot into a
    pill (~220 ms). Recording starts at once.
 3. Recording: live waveform from the mic level (10 bars, smoothed), mode icon, timer after 3 s. Release ends it and
-   the run starts (Dictate and Translate are hold to talk). A tap shorter than 300 ms with no second press is not a
-   dictation: the bar goes away without the cancel sound and nothing runs.
+   the run starts (Dictate is hold to talk; Translate can be held too, see 2.3.2). A tap shorter than 300 ms with no
+   second press is not a dictation: the bar goes away without the cancel sound and nothing runs.
    Pressing Fn twice within 300 ms starts hands-free mode (lock icon); the next press ends it. Esc cancels
    (short shake, fade out, nothing inserted).
 4. Processing: the waveform folds into a shimmering line; after 2 s a quiet "Still working" label fades in.
@@ -52,7 +52,7 @@ The bar is a transparent, always-on-top, non-focusable window on the screen that
 With selected text, the instruction applies to it and the result replaces the selection. Without a selection the
 answer shows in a floating card above the bar (Copy, Insert, Esc closes); it is never auto-inserted.
 
-### 2.3 Translate (default `Fn+Left Shift`, held)
+### 2.3 Translate (default `Fn+Left Shift`, press to start, press to stop, or held)
 
 Output in the first of up to 3 target languages from Settings; the bar shows the language code while recording.
 
@@ -61,9 +61,15 @@ Output in the first of up to 3 target languages from Settings; the bar shows the
 Short, dismissible hints next to the bar teach the shortcuts while they are used (each shown at most a few times, then
 never again; all off with one switch in Settings):
 
-- Ask Anything held like Dictate: "No need to hold. Press once, speak, press again."
+- Ask Anything held like Dictate: "No need to hold. Press Fn to finish."
+- Ask Anything or Translate finished with the whole combination again (`Fn+Space`): "Press Fn to finish." (only when
+  Dictate is on `Fn`).
 - After a few long dictations: "Press Fn twice to keep talking hands-free."
-- Speaking into a field Comma cannot paste into: the text is copied, with "Copied. Paste it with Cmd+V."
+- With Accessibility, Comma always pastes. When the app reports no text field it still sends Cmd+V and also leaves
+  the text on the clipboard.
+- Without Accessibility the text is only copied, and the bar says "Copied. Allow Accessibility so Comma can paste for
+  you" with Allow, which opens the Accessibility pane. This shows at most once per launch. While Accessibility is
+  missing, Home shows a line with the same button.
 - A clearly better microphone is connected: "Switch to <device>?" with Switch and Not now.
 - Permission lost or signed out: one line with a button that opens the fix. The Input Monitoring hint shows once per
   launch (Fn alone still works without it); once Comma asked for it in this run, or it is allowed but not applied,
@@ -92,6 +98,15 @@ never again; all off with one switch in Settings):
   kept.
 - Ask Anything with selected text rewrites the selection and replaces it; without a selection the answer shows in
   the answer card.
+- Pressing Fn to finish never starts anything. The rest of that press is ignored until Fn comes up, so `Fn`, then
+  `Space`, finishes Ask Anything and does not start a new one.
+- Translate: a release within 300 ms of the start keeps recording until the next press. A release after that
+  finishes. A second press within 300 ms of the start means nothing was said, so it goes away quietly.
+- The Space or Left Shift that switches modes is not typed into the focused app only when the active tap (Swallow Fn)
+  is on. The default listen-only tap cannot drop events, so the focused app also gets that key, and Settings says so.
+  With `Fn` held, Space usually does nothing in other apps. In hands-free, a bare Space types a space.
+- Paste last result is an ordinary shortcut, configurable in Settings > Shortcuts, and can be turned off (empty). It
+  pastes this launch's last result, or else the newest successful run in history, into the app in front.
 
 ### 2.4 Onboarding (first launch; can be rerun from Settings)
 
@@ -211,8 +226,9 @@ comma/
   tap (macOS delivers those only with the permission in effect; the preflight can stay "no" until relaunch). Until
   then the fallbacks are registered next to the tap. The permission is re-checked every 2 s and a fresh tap starts
   when it changes. Swallow Fn (experimental, off by default, devtool): an active HID-level tap, needing
-  Accessibility, that drops only the Fn key's own events while an Fn shortcut is configured and a Space that is the
-  trigger of a held Fn combination, re-enabled when macOS disables it; whether that stops the Globe key action
+  Accessibility, that drops only the Fn key's own events while an Fn shortcut is configured and a trigger key (Space,
+  Left Shift) pressed as part of a shortcut or as a mode switch in hands-free (its release exactly when its press was
+  dropped), re-enabled when macOS disables it; whether that stops the Globe key action
   depends on macOS, so the Globe key line above stays the documented fix.
 - Logging (`tauri-plugin-log`): `~/Library/Logs/app.comma.desktop/comma.log`, rotated at 2 MB, five old files kept.
   It records lifecycle, listener state changes (tap started, fallback, errors), permission changes, shortcut actions
@@ -230,7 +246,7 @@ comma/
 - Context (`context.rs`): focused app name and bundle id via NSWorkspace; selected text via the Accessibility API only
   when an Ask Anything run starts. Nothing else.
 - Paste (`paste.rs`): save clipboard, write text, send Cmd+V to the focused app, restore clipboard after 400 ms.
-  Requires Accessibility; without it, copy only and tell the user.
+  Requires Accessibility; without it, copy only and tell the user (2.3.1).
 - Storage (`db.rs`, SQLite via rusqlite): `runs` (id, ts, mode, app, raw_text, refined_text, audio_secs, stt_ms,
   llm_ttft_ms, llm_total_ms, total_ms, prompt_tokens, completion_tokens, stt_cost_usd, ok, error), `dictionary`
   (id, term, created_at). Settings in a JSON file in the app config dir; secrets in the Keychain (`keyring` crate).
@@ -249,7 +265,7 @@ exists. Commands (frontend -> Rust) all return `Result<T, AppError { code, messa
 | `llm_models(base_url?) -> string[]`, `llm_test(base_url?, model?, reasoning_effort?)`, `stt_test()` | Connection tests (first-token latency, precise errors) |
 | `stt_transcribe(wav_base64) -> Transcription`, `refine_text(mode, text, target_language?, selected_text?) -> RefineResult` | Single stages, used by the onboarding microphone test |
 | `account_check(server_url?)`, `account_register`, `account_verify_email`, `account_resend_code`, `account_sign_in -> AccountStatus`, `account_status`, `account_sign_out`, `account_credits -> Credits` | Comma account; tokens stay in the Keychain, refreshed on 401 |
-| `shortcuts_status() -> ShortcutsStatus` | `listener` (`fn` or `fallback`), the shortcut each mode answers to now, registration errors, the Globe key setting, `tap` (`running`, `off`, `failed`), `tap_error`, `tap_delivered`, `tap_keys` (a key press arrived: the permission is in effect), `requested`, `swallow`, `input_monitoring` (preflight), `restart_required`, `registered` |
+| `shortcuts_status() -> ShortcutsStatus` | `listener` (`fn` or `fallback`), the shortcut each mode answers to now, registration errors, the Globe key setting, `tap` (`running`, `off`, `failed`), `tap_error`, `tap_delivered`, `tap_keys` (a key press arrived: the permission is in effect), `requested`, `swallow`, `input_monitoring` (preflight), `restart_required`, `registered`, `paste_last_error` |
 | `shortcuts_restart() -> ShortcutsStatus`, `shortcuts_probe() -> ShortcutsStatus` | Stop and set up the tap and the plugin shortcuts again; probe also tries the tap without the preflight (never prompts) |
 | `shortcuts_set_swallow(on) -> ShortcutsStatus` | Experimental active tap that swallows Fn; `swallow` is `off`, `on` or `unavailable` |
 | `shortcuts_capture(owner)` | While the onboarding window (try steps) or the hub (Fn key test) is focused, shortcut events go to it instead of the bar and nothing records |
@@ -273,13 +289,13 @@ Events (Rust -> frontend, and window to window):
 | `shortcut://down`, `shortcut://up`, `shortcut://cancel` | `{ mode, quiet? }` | To the bar, or to the window that captures; `quiet` on a cancel for a tap too short to hold speech |
 | `shortcut://switch` | `{ mode, hands_free }` | Mode changed mid-recording (Fn, then Space), or hands-free locked |
 | `shortcut://keys` | `{ held }` | Only configured keys, for the keyboard tests; to every window |
-| `shortcut://action` | `{ action: start\|switch\|stop\|cancel\|hint, mode, hands_free?, quiet?, source: fn\|plugin, target: bar\|onboarding\|hub }` | Every action, to every window (devtool, Fn key test) |
+| `shortcut://action` | `{ action: start\|switch\|stop\|cancel\|hint, mode, hands_free?, quiet?, hint?, source: fn\|plugin, target: bar\|onboarding\|hub }` | Every action, to every window (devtool, Fn key test) |
 | `shortcut://status` | `ShortcutsStatus` | When the listener status changes |
 | `run://stage` | `{ id, stage: stt\|llm\|paste, ms }` | To the window that runs it, and to the hub (devtool) |
 | `run://delta` | `{ id, text }` | Streamed rewrite (Local mode) |
 | `run://done` | `{ id, result }` | |
 | `run://error` | `{ id, code, message, reason? }` | `reason` such as `quota_exceeded`, `signed_out` |
-| `bar://hint` | `{ kind }` | Hint to show (already counted); kinds include `input_monitoring` and `relaunch` |
+| `bar://hint` | `{ kind }` | Hint to show (already counted); kinds include `input_monitoring`, `relaunch`, `finish_with_fn` and `paste_access` |
 | `bar://preview` | `{ state, mode?, message?, hands_free?, done_label?, hint?, hint_actions?, answer? }` | Dev builds, or with developer tools on; `idle` ends the preview |
 | `history://changed` | `{ id? }` | The hub refetches |
 | `hub://open` | `{ page, section? }` | Bar -> hub: Details, Sign in |

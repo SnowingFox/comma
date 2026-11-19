@@ -22,6 +22,7 @@ function shortcutsStatus(): ShortcutsStatus {
       swallow: "off",
       input_monitoring: restart,
       restart_required: restart,
+      paste_last_error: null,
       registered: [
         ...(restart
           ? []
@@ -49,6 +50,7 @@ function shortcutsStatus(): ShortcutsStatus {
     swallow: "off",
     input_monitoring: true,
     restart_required: false,
+    paste_last_error: null,
     registered: [
       { mode: "dictate", shortcut: "Fn", via: "fn" },
       { mode: "ask", shortcut: "Fn+Space", via: "fn" },
